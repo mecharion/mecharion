@@ -1,0 +1,29 @@
+# sqlc 配置。生成的代码提交进仓库——离线环境下构建不能依赖再跑一次生成。
+#
+#   go install github.com/sqlc-dev/sqlc/cmd/sqlc@latest
+#   cd internal/store && sqlc generate
+#
+# 选 sqlc 而非 ORM 的理由见 docs/design/07-persistence.md §1.4：
+# ORM 在「对象图 + 大量条件查询」场景下持续添堵。
+version: "2"
+sql:
+  - engine: "sqlite"
+    schema: "migrations"
+    queries: "queries"
+    gen:
+      go:
+        package: "sqlcgen"
+        out: "sqlcgen"
+        emit_json_tags: false
+        emit_prepared_queries: false
+        emit_interface: true
+        emit_empty_slices: true
+        emit_result_struct_pointers: false
+        emit_params_struct_pointers: false
+        overrides:
+          # SQLite 里时间存 RFC3339 字符串（字典序即时间序），
+          # 由 store.FormatTime / ParseTime 转换，不让生成层猜。
+          - column: "*.created_at"
+            go_type: "string"
+          - column: "*.updated_at"
+            go_type: "string"

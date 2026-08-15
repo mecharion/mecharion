@@ -1,0 +1,16 @@
+# 由 Mecharion 渲染，请勿手工编辑
+# Component: {{ .Component }}  Profile: {{ .Profile }}
+
+# JDK 由 jdk11 pack 提供（requires.packs, scope: node）。
+# 引用其解析后的路径，而非约定路径——Component 名可能不是 "jdk11"。
+export JAVA_HOME="{{ .Requires.jdk11.Paths.Current }}"
+
+export HADOOP_HOME="{{ .Paths.Current }}"
+export HADOOP_CONF_DIR="{{ .Paths.Config }}"
+export HADOOP_LOG_DIR="{{ .Paths.Logs }}"
+export HADOOP_PID_DIR="{{ .Paths.Runtime }}"
+
+# 堆大小由各角色的 systemd env 单独设置（HDFS_NAMENODE_OPTS 等），
+# 此处只设通用项，避免与 systemd 层重复定义。
+export HADOOP_HEAPSIZE_MAX=
+export HADOOP_OPTS="${HADOOP_OPTS} -Djava.net.preferIPv4Stack=true"

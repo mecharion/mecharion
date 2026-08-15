@@ -1,0 +1,22 @@
+# 由 Mecharion 渲染，请勿手工编辑。
+# 修改会在下一次调和（默认 60 秒）时被覆盖。
+#
+# **本文件不含任何口令**：DB_PASSWORD 来自 systemd 的 EnvironmentFile
+# （见 env.tmpl），Spring 在启动时用 ${...} 语法取环境变量。
+# 于是这份配置可以随手贴进工单、支持包甚至 git，而口令留在 0640 的那个文件里。
+
+server.port={{ .Params.port }}
+
+# 连接串、账号来自 postgresql 导出的具名字段。提供方只说「我有
+# host / port / database / username / password」，拼成 Spring 要的形状
+# 是消费方自己的事——PostgreSQL 不可能知道下游要 JDBC 还是 libpq。
+spring.datasource.url={{ .Params.jdbc_url }}
+spring.datasource.username={{ .Params.db_user }}
+spring.datasource.password=${DB_PASSWORD}
+spring.datasource.driver-class-name=org.postgresql.Driver
+
+spring.datasource.hikari.maximum-pool-size=10
+spring.datasource.hikari.connection-timeout=30000
+
+management.endpoints.web.exposure.include=health
+management.endpoint.health.probes.enabled=true

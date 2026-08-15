@@ -1,0 +1,311 @@
+schema: pack/v1
+name: postgresql
+version: "16.4"
+revision: 1
+description: "PostgreSQL 关系数据库——支持单机与流复制主备"
+homepage: "https://www.postgresql.org"
+license: PostgreSQL
+keywords: [database, sql, rdbms]
+platforms: [linux/amd64, linux/arm64]
+
+requires:
+  os:
+    family: [debian, rhel]
+    glibc: ">=2.17"
+  resources:
+    memory: 1GB
+    diskFree: 5GB
+
+# PostgreSQL 大版本升级需要 pg_upgrade 与新的数据目录，不能靠「换 generation、
+# 保数据目录」完成。声明兼容范围，引擎会拒绝 15.x → 16.x 这类跨界升级，
+# 提示走「新建 Component + 数据迁移」路径。
+upgradePolicy:
+  compatible: "~16"
+
+blobs:
+  main:
+    linux/amd64:
+      sha256:    "2222222222222222222222222222222222222222222222222222222222222222"
+      size:      31457280
+      filename:  "postgresql-16.4-linux-amd64.tar.gz"
+      sourceUrl: "https://ftp.postgresql.org/pub/source/v16.4/postgresql-16.4.tar.gz"
+    linux/arm64:
+      sha256:    "3333333333333333333333333333333333333333333333333333333333333333"
+      size:      30214656
+      filename:  "postgresql-16.4-linux-arm64.tar.gz"
+
+# ── 参数 ──────────────────────────────────────────────────────────────
+params:
+  port:
+    type: port
+    default: 5432
+    description: "监听端口"
+    group: "网络"
+    restartRequired: true
+
+  listen_addresses:
+    type: string
+    default: "0.0.0.0"
+    group: "网络"
+    restartRequired: true
+
+  encoding:
+    type: enum
+    values: [UTF8, LATIN1, SQL_ASCII]
+    default: UTF8
+    description: "数据库编码，initdb 后不可更改"
+    immutable: true
+
+  admin_password:
+    type: secret
+    required: true
+    description: "superuser 密码"
+    group: "安全"
+
+  # ── 供消费方使用的应用账号 ──────────────────────────────────────────
+  # superuser 口令**绝不导出**给消费方。要被消费的凭据是一个专门为这段
+  # 依赖关系存在的账号，由 postStart hook 建出来。
+  app_db:
+    type: string
+    default: app
+    description: "为消费方创建的数据库"
+    group: "安全"
+
+  app_user:
+    type: string
+    default: appuser
+    description: "为消费方创建的账号"
+    group: "安全"
+
+  app_password:
+    type: secret
+    generate: { length: 32 }
+    description: "应用账号密码，由引擎生成，运维无需也不应知道"
+    group: "安全"
+
+  shared_buffers:
+    type: size
+    default: 128MB
+    description: "共享缓冲区，经验值为物理内存的 25%"
+    group: "性能"
+    advanced: true
+    restartRequired: true
+
+  max_connections:
+    type: int
+    default: 100
+    min: 10
+    max: 10000
+    group: "性能"
+    advanced: true
+    restartRequired: true
+
+  log_min_duration_statement:
+    type: duration
+    default: 1s
+    description: "慢查询日志阈值"
+    group: "日志"
+    advanced: true
+    reloadRequired: true
+
+  allowed_cidr:
+    type: cidr
+    default: "10.0.0.0/8"
+    description: "允许连接的网段（写入 pg_hba.conf）"
+    group: "安全"
+    reloadRequired: true
+
+# ── 路径 ──────────────────────────────────────────────────────────────
+# PostgreSQL 的配置文件位于数据目录内（PGDATA）。
+# 这是「配置在 data 内」这一布局的直接表达——不变式自动满足，无需 linkInto。
+paths:
+  data:
+    default: "{{ .Node.Roots.data }}/apps/{{ .Component }}"
+    owner:   postgres
+    mode:    "0700"
+  config:
+    default: "{{ .Paths.Data }}/pgdata"
+    owner:   postgres
+    mode:    "0700"
+
+# ── 对外导出 ──────────────────────────────────────────────────────────
+# 导出**具名字段**而不是拼好的连接串：PostgreSQL 不可能知道下游要
+# libpq DSN、JDBC URL 还是拆开的字段。让提供方去猜，等于把消费方的
+# 实现细节写进了提供方。
+exports:
+  app:
+    description: "应用账号连接信息"
+    role: primary
+    port: "{{ .Params.port }}"
+    fields:
+      host:     "{{ .Address }}"
+      port:     "{{ .Params.port }}"
+      database: "{{ .Params.app_db }}"
+      username: "{{ .Params.app_user }}"
+      # 引用了 secret 参数 → 该字段自动带敏感标记，并随取值传播到消费方
+      password: "{{ .Params.app_password }}"
+
+# ── 全角色共有 ────────────────────────────────────────────────────────
+shared:
+  resources:
+    - group: { name: postgres, system: true }
+    - user:
+        name:   postgres
+        system: true
+        group:  postgres
+        home:   "{{ .Paths.Data }}"
+        shell:  /bin/bash
+    - archive: { blob: main, dest: "{{ .Paths.Generation }}", strip: 1 }
+    - directory: { path: "{{ .Paths.Logs }}", owner: postgres, mode: "0750" }
+
+# ── 角色 ──────────────────────────────────────────────────────────────
+roles:
+  - name: primary
+    description: "主库，接受读写"
+    cardinality: "1"
+
+    params:
+      max_wal_senders:
+        type: int
+        default: 10
+        min: 0
+        description: "允许的流复制连接数"
+        advanced: true
+        restartRequired: true
+      wal_keep_size:
+        type: size
+        default: 1GB
+        advanced: true
+        reloadRequired: true
+
+    resources:
+      # config 已在 paths 中声明 owner/mode，引擎自动创建
+      - script:
+          src:     initdb.sh
+          user:    postgres
+          creates: "{{ .Paths.Config }}/PG_VERSION"
+          timeout: 300s
+      - template:
+          src:    postgresql.conf.tmpl
+          dest:   "{{ .Paths.Config }}/postgresql.conf"
+          owner:  postgres
+          mode:   "0600"
+          notify: reload
+      - template:
+          src:    pg_hba.conf.tmpl
+          dest:   "{{ .Paths.Config }}/pg_hba.conf"
+          owner:  postgres
+          mode:   "0600"
+          notify: reload
+
+    workload:
+      runtime: systemd
+      systemd:
+        exec:        "{{ .Paths.Current }}/bin/postgres -D {{ .Paths.Config }}"
+        execReload:  "{{ .Paths.Current }}/bin/pg_ctl reload -D {{ .Paths.Config }}"
+        user:        postgres
+        group:       postgres
+        env:
+          PGDATA: "{{ .Paths.Config }}"
+        restart:     always
+        restartSec:  5s
+        limitNofile: 65536
+        killMode:    mixed
+        timeoutStop: 120s
+
+    health:
+      exec: { command: ["{{ .Paths.Current }}/bin/pg_isready", "-p", "{{ .Params.port }}", "-q"] }
+      startupGrace: 60s
+      interval: 15s
+
+    hooks:
+      # 只在主库上、且整个 Component 只执行一次：创建复制用户与应用账号。
+      #
+      # **必须是 postStart 而不是 postInstall**：这个脚本要连上数据库执行
+      # SQL，而 postInstall 排在资源之后、**启动之前**（18-hooks §2）。
+      # 放在 postInstall 会让它在一个还没起来的库上重试到超时。
+      postStart:
+        - script: bootstrap-roles.sh
+          scope:  once
+          user:   postgres
+
+  - name: replica
+    description: "只读副本，通过流复制跟随主库"
+    cardinality: "0-N"
+    requires: [primary]
+
+    params:
+      primary_host:
+        type: string
+        from: "topology.role('primary').nodes[0].address"
+      hot_standby:
+        type: bool
+        default: true
+        advanced: true
+        restartRequired: true
+
+    resources:
+      # config 已在 paths 中声明 owner/mode，引擎自动创建
+      - script:
+          src:     basebackup.sh
+          user:    postgres
+          creates: "{{ .Paths.Config }}/PG_VERSION"
+          timeout: 3600s
+      - template:
+          src:    postgresql.conf.tmpl
+          dest:   "{{ .Paths.Config }}/postgresql.conf"
+          owner:  postgres
+          mode:   "0600"
+          notify: reload
+
+    workload:
+      runtime: systemd
+      systemd:
+        exec:        "{{ .Paths.Current }}/bin/postgres -D {{ .Paths.Config }}"
+        execReload:  "{{ .Paths.Current }}/bin/pg_ctl reload -D {{ .Paths.Config }}"
+        user:        postgres
+        group:       postgres
+        restart:     always
+        timeoutStop: 120s
+
+    health:
+      exec: { command: ["{{ .Paths.Current }}/bin/pg_isready", "-p", "{{ .Params.port }}", "-q"] }
+      startupGrace: 120s
+
+  # 无 workload 的角色：只分发客户端连接配置（对应 CM 的 Gateway）
+  - name: client
+    description: "客户端配置分发，不启动任何进程"
+    cardinality: "0-N"
+    resources:
+      - directory: { path: /etc/postgresql-common, mode: "0755" }
+      - template:
+          src:  pg_service.conf.tmpl
+          dest: /etc/postgresql-common/pg_service.conf
+          mode: "0644"
+
+# ── 部署形态 ──────────────────────────────────────────────────────────
+profiles:
+  - name: standalone
+    default: true
+    description: "单机，无副本"
+    minNodes: 1
+    roles:
+      replica: { enabled: false }
+    params:
+      max_wal_senders: { default: 0 }
+
+  - name: replicated
+    description: "主备流复制，一主多从"
+    minNodes: 2
+    upgradeFrom: [standalone]
+    roles:
+      replica: { cardinality: "1-N" }
+    placement:
+      - antiAffinity: [primary, replica]
+        scope: node
+        enforcement: required
+        reason: "主备同节点时不提供任何故障保护，且端口冲突"
+      - antiAffinity: [replica]
+        scope: node
+        enforcement: required
+        reason: "多个副本同节点无意义且端口冲突"

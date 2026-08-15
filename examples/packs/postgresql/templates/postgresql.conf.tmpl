@@ -1,0 +1,28 @@
+# 由 Mecharion 渲染，请勿手工编辑
+# Component: {{ .Component }}  Role: {{ .Role }}  Profile: {{ .Profile }}
+# Generation: {{ .Generation.Seq }}
+
+listen_addresses = '{{ .Params.listen_addresses }}'
+port = {{ .Params.port }}
+max_connections = {{ .Params.max_connections }}
+shared_buffers = {{ .Params.shared_buffers }}
+
+logging_collector = on
+log_directory = '{{ .Paths.Logs }}'
+log_filename = 'postgresql-%Y-%m-%d.log'
+log_min_duration_statement = {{ .Params.log_min_duration_statement.Milliseconds }}
+
+{{- if eq .Role "primary" }}
+
+# ── 主库：流复制发送端 ──
+wal_level = replica
+max_wal_senders = {{ .Params.max_wal_senders }}
+wal_keep_size = {{ .Params.wal_keep_size }}
+{{- end }}
+
+{{- if eq .Role "replica" }}
+
+# ── 副本：流复制接收端 ──
+hot_standby = {{ if .Params.hot_standby }}on{{ else }}off{{ end }}
+primary_conninfo = 'host={{ .Params.primary_host }} port={{ .Params.port }} user=replicator application_name={{ .Node.Name }}'
+{{- end }}

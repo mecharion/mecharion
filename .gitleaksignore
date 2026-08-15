@@ -1,0 +1,9 @@
+# 已确认的误报，不是真实泄漏——见每行前一次 gitleaks 扫描时的复核记录。
+#
+# docs/design/08-security.md:203（当前工作树）与下面那条历史提交里的
+# 同一处——文档里展示的初始 admin token 示例，以字面量 "..." 结尾，是
+# 说明格式用的占位符，不是真实凭据。历史扫描（--source . 默认过 git log）
+# 用的是带 commit hash 的指纹格式，与工作树扫描的指纹不是同一个，两条
+# 都要列，缺一条对应的扫描模式仍会报。
+docs/design/08-security.md:generic-api-key:203
+3a51359c6aee45ae3ca251426d96fb0c0711c2d8:docs/design/08-security.md:generic-api-key:115

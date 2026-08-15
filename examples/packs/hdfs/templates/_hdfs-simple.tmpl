@@ -1,0 +1,17 @@
+{{- define "hdfs-simple" -}}
+  <!-- 非 HA：单 NameNode -->
+  <property>
+    <name>dfs.namenode.rpc-address</name>
+    <value>{{ (index (.Topology.Role "namenode") 0).Address }}:{{ .Params.nn_rpc_port }}</value>
+  </property>
+  <property>
+    <name>dfs.namenode.http-address</name>
+    <value>{{ (index (.Topology.Role "namenode") 0).Address }}:{{ .Params.nn_http_port }}</value>
+  </property>
+{{- if eq .Profile "distributed" }}
+  <property>
+    <name>dfs.namenode.secondary.http-address</name>
+    <value>{{ (index (.Topology.Role "secondarynamenode") 0).Address }}:9868</value>
+  </property>
+{{- end }}
+{{- end -}}

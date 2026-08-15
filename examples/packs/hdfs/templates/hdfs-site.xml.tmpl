@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  由 Mecharion 渲染，请勿手工编辑
+  Component: {{ .Component }}  Profile: {{ .Profile }}  Generation: {{ .Generation.Seq }}
+-->
+<configuration>
+
+  <!-- ── 全形态共有 ────────────────────────────────────────────── -->
+{{ template "hdfs-common" . }}
+
+  <!-- ── 形态相关 ──────────────────────────────────────────────── -->
+{{- if eq .Profile "ha" }}
+{{ template "hdfs-ha" . }}
+{{- else }}
+{{ template "hdfs-simple" . }}
+{{- end }}
+
+</configuration>

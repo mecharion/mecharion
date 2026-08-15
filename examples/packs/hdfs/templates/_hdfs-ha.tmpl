@@ -1,0 +1,49 @@
+{{- define "hdfs-ha" -}}
+  <!-- HA：名称服务 + 双 NameNode + JournalNode 仲裁 -->
+  <property>
+    <name>dfs.nameservices</name>
+    <value>{{ .Params.nameservice_id }}</value>
+  </property>
+  <property>
+    <name>dfs.ha.namenodes.{{ .Params.nameservice_id }}</name>
+    <value>{{ range $i, $n := .Topology.Role "namenode" }}{{ if $i }},{{ end }}nn{{ $i }}{{ end }}</value>
+  </property>
+{{ range $i, $n := .Topology.Role "namenode" }}
+  <property>
+    <name>dfs.namenode.rpc-address.{{ $.Params.nameservice_id }}.nn{{ $i }}</name>
+    <value>{{ $n.Address }}:{{ $.Params.nn_rpc_port }}</value>
+  </property>
+  <property>
+    <name>dfs.namenode.http-address.{{ $.Params.nameservice_id }}.nn{{ $i }}</name>
+    <value>{{ $n.Address }}:{{ $.Params.nn_http_port }}</value>
+  </property>
+{{- end }}
+
+  <property>
+    <name>dfs.namenode.shared.edits.dir</name>
+    <value>qjournal://{{ range $i, $j := .Topology.Role "journalnode" }}{{ if $i }};{{ end }}{{ $j.Address }}:8485{{ end }}/{{ .Params.nameservice_id }}</value>
+  </property>
+  <property>
+    <name>dfs.journalnode.edits.dir</name>
+    <value>{{ .Paths.JnDir }}</value>
+  </property>
+
+  <property>
+    <name>dfs.client.failover.proxy.provider.{{ .Params.nameservice_id }}</name>
+    <value>org.apache.hadoop.hdfs.server.namenode.ha.ConfiguredFailoverProxyProvider</value>
+  </property>
+  <property>
+    <name>dfs.ha.automatic-failover.enabled</name>
+    <value>true</value>
+  </property>
+  <property>
+    <name>dfs.ha.fencing.methods</name>
+    <value>{{ .Params.fencing_method }}</value>
+  </property>
+{{- if eq .Params.fencing_method "sshfence" }}
+  <property>
+    <name>dfs.ha.fencing.ssh.private-key-files</name>
+    <value>{{ .Paths.Config }}/fencing_id_rsa</value>
+  </property>
+{{- end }}
+{{- end -}}

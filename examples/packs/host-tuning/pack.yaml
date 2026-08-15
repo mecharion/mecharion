@@ -1,0 +1,181 @@
+schema: pack/v1
+name: host-tuning
+version: "1.0.0"
+revision: 1
+description: "主机调优 —— 大数据/数据库组件的通用前置配置，无载荷、无进程"
+license: Apache-2.0
+keywords: [host, sysctl, tuning, prerequisite]
+platforms: [linux/amd64, linux/arm64]
+
+requires:
+  os:
+    family: [debian, rhel]
+
+# 没有 blobs —— 本 Pack 不分发任何二进制，只声明主机应处于什么状态。
+# 这验证了「主机配置与组件部署是同一个引擎」：无 workload 的 Pack 就是纯主机配置。
+
+params:
+  swappiness:
+    type: int
+    default: 1
+    min: 0
+    max: 100
+    description: "vm.swappiness，大数据/数据库场景建议 1"
+    group: "内存"
+
+  max_map_count:
+    type: int
+    default: 262144
+    min: 65530
+    description: "vm.max_map_count，Elasticsearch/HBase 要求 ≥262144"
+    group: "内存"
+
+  overcommit_memory:
+    type: enum
+    values: ["0", "1", "2"]
+    default: "0"
+    description: "vm.overcommit_memory；Redis 建议 1"
+    group: "内存"
+    advanced: true
+
+  somaxconn:
+    type: int
+    default: 32768
+    group: "网络"
+    advanced: true
+
+  nofile_limit:
+    type: int
+    default: 65536
+    min: 1024
+    description: "文件描述符上限"
+    group: "限额"
+
+  nproc_limit:
+    type: int
+    default: 65536
+    min: 1024
+    group: "限额"
+
+  limits_domain:
+    type: string
+    default: "*"
+    description: "limits 生效的用户/组，默认全部用户"
+    group: "限额"
+
+  disable_selinux:
+    type: bool
+    default: true
+    description: "关闭 SELinux（大数据组件常见前置要求）"
+    group: "安全"
+
+  disable_thp:
+    type: bool
+    default: true
+    description: "关闭透明大页；MongoDB/HBase/Redis 均要求关闭"
+    group: "内存"
+
+  disable_swap:
+    type: bool
+    default: false
+    description: "关闭 swap 并从 fstab 注释掉——**破坏性操作**，默认关闭"
+    group: "内存"
+    advanced: true
+
+roles:
+  - name: apply
+    description: "应用主机调优；无 workload"
+    cardinality: "0-N"
+
+    resources:
+      # ── 内核参数 ──────────────────────────────────────────────
+      - sysctl: { key: vm.swappiness,        value: "{{ .Params.swappiness }}" }
+      - sysctl: { key: vm.max_map_count,     value: "{{ .Params.max_map_count }}" }
+      - sysctl: { key: vm.overcommit_memory, value: "{{ .Params.overcommit_memory }}" }
+      - sysctl: { key: net.core.somaxconn,   value: "{{ .Params.somaxconn }}" }
+      - sysctl: { key: net.ipv4.tcp_max_syn_backlog, value: "16384" }
+      - sysctl: { key: fs.file-max,          value: "{{ mul .Params.nofile_limit 16 }}" }
+
+      # ── 资源限额 ──────────────────────────────────────────────
+      - limits: { domain: "{{ .Params.limits_domain }}", item: nofile, soft: "{{ .Params.nofile_limit }}", hard: "{{ .Params.nofile_limit }}" }
+      - limits: { domain: "{{ .Params.limits_domain }}", item: nproc,  soft: "{{ .Params.nproc_limit }}",  hard: "{{ .Params.nproc_limit }}" }
+
+      # ── SELinux ───────────────────────────────────────────────
+      # 持久化配置 + 运行期生效，两步缺一不可
+      - template:
+          src:   selinux-config.tmpl
+          dest:  /etc/selinux/config
+          mode:  "0644"
+          when:  "{{ .Params.disable_selinux }}"
+      - command:
+          run:    "/usr/sbin/setenforce 0"
+          unless: "/usr/sbin/getenforce | grep -qv Enforcing"
+          when:   "{{ .Params.disable_selinux }}"
+
+      # ── 透明大页 ──────────────────────────────────────────────
+      # THP 设置不持久化，必须靠开机 oneshot 单元。
+      # 这是 systemd_unit 资源与 workload 的分野：本 Pack 没有"进程"，
+      # 但确实需要一个在每次开机时跑一遍的单元。
+      - file:
+          path:   /usr/local/sbin/disable-thp.sh
+          source: disable-thp.sh
+          mode:   "0755"
+          when:   "{{ .Params.disable_thp }}"
+      - systemd_unit:
+          name:    mecharion-disable-thp.service
+          content: |
+            [Unit]
+            Description=Disable Transparent Huge Pages (managed by Mecharion)
+            DefaultDependencies=no
+            After=sysinit.target local-fs.target
+            Before=basic.target
+
+            [Service]
+            Type=oneshot
+            RemainAfterExit=yes
+            ExecStart=/usr/local/sbin/disable-thp.sh
+
+            [Install]
+            WantedBy=basic.target
+          enabled: true
+          state:   started
+          when:    "{{ .Params.disable_thp }}"
+
+      # ── swap ──────────────────────────────────────────────────
+      - command:
+          run:    "/sbin/swapoff -a"
+          unless: "/usr/bin/test $(/usr/bin/free | /usr/bin/awk '/Swap/{print $2}') -eq 0"
+          when:   "{{ .Params.disable_swap }}"
+      - command:
+          run:    "/usr/bin/sed -i.mecharion-bak '/[[:space:]]swap[[:space:]]/s/^/#/' /etc/fstab"
+          unless: "/usr/bin/grep -qE '^[^#].*[[:space:]]swap[[:space:]]' /etc/fstab; test $? -ne 0"
+          when:   "{{ .Params.disable_swap }}"
+
+    # 无 workload、无 health —— 本角色只保证主机处于声明的状态
+
+profiles:
+  # profiles 不只用于集群拓扑——这里它是「调优预设」
+  - name: bigdata
+    default: true
+    description: "大数据组件通用（Hadoop / HBase / Kafka / Elasticsearch）"
+    params:
+      swappiness:      { default: 1 }
+      max_map_count:   { default: 262144 }
+      disable_thp:     { default: true }
+      disable_selinux: { default: true }
+
+  - name: database
+    description: "关系数据库（PostgreSQL / MySQL）"
+    params:
+      swappiness:        { default: 1 }
+      overcommit_memory: { default: "2" }
+      max_map_count:     { default: 65530 }
+      disable_thp:       { default: true }
+      nofile_limit:      { default: 65536 }
+
+  - name: minimal
+    description: "只调限额，不动内核安全设置——受限环境或合规要求下使用"
+    params:
+      disable_selinux: { default: false }
+      disable_thp:     { default: false }
+      swappiness:      { default: 60 }

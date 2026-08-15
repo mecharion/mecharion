@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  由 Mecharion 渲染，请勿手工编辑
+  Component: {{ .Component }}  Profile: {{ .Profile }}
+-->
+<configuration>
+
+  <property>
+    <name>fs.defaultFS</name>
+{{- if eq .Profile "ha" }}
+    <value>hdfs://{{ .Params.nameservice_id }}</value>
+{{- else }}
+    <value>hdfs://{{ (index (.Topology.Role "namenode") 0).Address }}:{{ .Params.nn_rpc_port }}</value>
+{{- end }}
+  </property>
+
+  <property>
+    <name>hadoop.tmp.dir</name>
+    <value>{{ .Paths.Runtime }}</value>
+  </property>
+
+{{- if eq .Profile "ha" }}
+
+  <property>
+    <name>ha.zookeeper.quorum</name>
+    <value>{{ .Params.zk_quorum }}</value>
+  </property>
+{{- end }}
+
+</configuration>

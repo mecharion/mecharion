@@ -1,0 +1,28 @@
+# 由 Mecharion 渲染，请勿手工编辑
+# Component: {{ .Component }}  Profile: {{ .Profile }}  Generation: {{ .Generation.Seq }}
+
+tickTime={{ .Params.tick_time.Milliseconds }}
+initLimit={{ .Params.init_limit }}
+syncLimit={{ .Params.sync_limit }}
+
+dataDir={{ .Paths.Data }}
+dataLogDir={{ .Paths.DataLogDir }}
+
+clientPort={{ .Params.client_port }}
+maxClientCnxns={{ .Params.max_client_cnxns }}
+
+autopurge.snapRetainCount={{ .Params.autopurge_snap_retain }}
+autopurge.purgeInterval=24
+
+admin.enableServer=false
+4lw.commands.whitelist=ruok,srvr,stat,mntr
+
+{{- if eq .Profile "ensemble" }}
+
+# ── 仲裁成员 ──
+# server.N 的 N 必须与该节点 dataDir/myid 中的数字一致。
+# ordinal 按节点名排序且稳定，ZK 编号从 1 起，因此统一 +1。
+{{- range $i, $n := .Topology.Role "server" }}
+server.{{ add $i 1 }}={{ $n.Address }}:{{ $.Params.quorum_port }}:{{ $.Params.election_port }}
+{{- end }}
+{{- end }}

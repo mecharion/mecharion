@@ -1,0 +1,20 @@
+# 由 Mecharion 渲染，请勿手工编辑
+# Component: {{ .Component }}  Role: {{ .Role }}  Profile: {{ .Profile }}
+#
+# ZooKeeper 模式（Kafka 3.x 遗留形态）。与 KRaft 模板的差异大到无法共用
+# 片段组合，因此整模板切换——由 broker 角色的两条 template 资源按 when 选择。
+
+broker.id={{ .Topology.Ordinal }}
+zookeeper.connect={{ .Params.zk_connect }}:2181
+zookeeper.connection.timeout.ms=18000
+
+listeners=PLAINTEXT://0.0.0.0:{{ .Params.client_port }}
+advertised.listeners=PLAINTEXT://{{ .Node.Address }}:{{ .Params.client_port }}
+
+log.dirs={{ join "," .Paths.LogDirs }}
+
+num.partitions={{ .Params.num_partitions }}
+default.replication.factor={{ .Params.default_replication_factor }}
+offsets.topic.replication.factor={{ .Params.default_replication_factor }}
+transaction.state.log.replication.factor={{ .Params.default_replication_factor }}
+log.retention.hours={{ div .Params.log_retention.Seconds 3600 }}

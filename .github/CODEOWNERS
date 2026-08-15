@@ -1,0 +1,3 @@
+# 单一维护者阶段：全仓库默认审核人。
+# 出现第二位长期 maintainer 时按目录拆分（见 GOVERNANCE，尚未建立）。
+*       humbinal@126.com

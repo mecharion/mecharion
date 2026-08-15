@@ -1,0 +1,165 @@
+schema: pack/v1
+name: paramkit
+version: "1.0.0"
+revision: 1
+description: "表单生成的验收夹具：12 种参数类型 × 每一种呈现分支各一份"
+license: Apache-2.0
+platforms: [linux/amd64]
+
+# 这不是一个能部署的组件，是**验收表第 8 条的夹具**（23-web-ui §5）。
+#
+# 为什么要单独造一个：examples/packs 里的 10 个包合起来也只覆盖 10 种
+# 类型——float 与 list<T> 一次都没出现过。而「12 种类型全部渲染正确」
+# 这条判据，靠覆盖 10 种的样本是验不出来的。
+#
+# 它同时把表单的每条分支各占一格：from（只读）、generate（无输入框）、
+# immutable（要重建）、restartRequired / reloadRequired（保存前告知）、
+# secret（永不回显）、advanced（默认折叠）、group（分组）。
+
+params:
+  # ── 11 种标量 ───────────────────────────────────────────────
+  p_string:
+    type: string
+    default: "hello"
+    description: "字符串"
+    group: "类型"
+  p_int:
+    type: int
+    default: 8
+    min: 1
+    max: 64
+    unit: "个"
+    group: "类型"
+  p_float:
+    type: float
+    default: 0.75
+    min: 0.0
+    max: 1.0
+    group: "类型"
+  p_bool:
+    type: bool
+    default: true
+    group: "类型"
+  p_enum:
+    type: enum
+    values: ["debug", "info", "warn", "error"]
+    default: "info"
+    group: "类型"
+  p_path:
+    type: path
+    default: "/var/lib/paramkit"
+    group: "类型"
+  p_port:
+    type: port
+    default: 9090
+    group: "类型"
+  p_duration:
+    type: duration
+    default: "30s"
+    group: "类型"
+  p_size:
+    type: size
+    default: "512Mi"
+    group: "类型"
+  p_cidr:
+    type: cidr
+    default: "10.0.0.0/8"
+    group: "类型"
+  p_secret:
+    type: secret
+    description: "口令。**永不回显**——界面上只显示设过没有"
+    group: "类型"
+
+  # ── 第 12 种：list<T> ──────────────────────────────────────
+  p_list:
+    type: list<string>
+    default: ["a", "b"]
+    description: "字符串列表"
+    group: "类型"
+
+  # ── 呈现分支 ───────────────────────────────────────────────
+  p_from:
+    type: string
+    from: "{{ .Site.Name }}"
+    description: "推导出来的客观事实，没有输入框"
+    group: "呈现"
+  p_generated:
+    type: secret
+    generate: { length: 24, charset: alnum }
+    description: "引擎生成，没有输入框"
+    group: "呈现"
+  p_immutable:
+    type: string
+    default: "fixed"
+    immutable: true
+    description: "改它要重建组件"
+    group: "呈现"
+  p_restart:
+    type: int
+    default: 100
+    restartRequired: true
+    description: "改它会重启服务"
+    group: "呈现"
+  p_reload:
+    type: int
+    default: 200
+    reloadRequired: true
+    description: "改它会 reload"
+    group: "呈现"
+  p_advanced:
+    type: string
+    default: "rarely"
+    advanced: true
+    description: "默认折叠"
+    group: "呈现"
+  p_required:
+    type: string
+    required: true
+    default: "must"
+    group: "呈现"
+  p_pattern:
+    type: string
+    default: "ab12"
+    pattern: "^[a-z0-9]+$"
+    group: "呈现"
+
+  # 未分组：排在最前，验的是 groupKey 的空串处理
+  p_ungrouped:
+    type: string
+    default: "first"
+
+paths:
+  conf:
+    default: "{{ .Node.Roots.etc }}/paramkit"
+    mode: "0750"
+
+roles:
+  - name: main
+    description: "唯一角色"
+    cardinality: "1-N"
+    params:
+      # roles[].params 是**该角色专有**的声明（spec §7.5），
+      # 不是用来覆盖顶层 default 的——那是 profiles[].params 的活。
+      p_role_only:
+        type: string
+        default: "only-on-main"
+        description: "只有 main 角色有这个参数"
+        group: "呈现"
+    resources:
+      - file:
+          path: "{{ .Paths.conf }}/paramkit.conf"
+          # **密钥必须被真的引用**，否则它进不了 SecretRefs、也就进不了
+          # digest。第一版夹具只声明不引用，于是「两次渲染各生成一个随机
+          # 口令」这个缺陷在变异测试里活了下来——被测的路径根本没经过密钥。
+          content: |
+            log={{ .Params.p_enum }}
+            port={{ .Params.p_port }}
+            token={{ .Params.p_generated }}
+          mode: "0644"
+
+profiles:
+  - name: small
+    description: "小规格：只改默认值，不改类型"
+    params:
+      p_int:
+        default: 2

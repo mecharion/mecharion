@@ -1,0 +1,78 @@
+schema: pack/v1
+name: realapp
+version: "1.0.0"
+revision: 1
+description: "第 10 步的验收夹具：一个**真的能装**的 Pack"
+license: Apache-2.0
+keywords: [fixture, upload]
+platforms: [linux/amd64]
+
+# 这是整条链路里第一个**真包**。
+#
+# examples/packs/ 里那些的 sha256 是占位符——它们是给人看格式的，装不了。
+# 而验收表第 17 条要的是「上传合法 Pack → 进入 Pack 集合」，靠一个装不了
+# 的包验不出来：它能通过 lint，却在部署那一刻才露馅。
+#
+# 载荷由 hack/realpack.sh 现造：把 test/webapp 编出来的二进制打成 tar.gz。
+# `mechpack assemble` 随后按 sources 算**真** sha256，`mechpack bundle`
+# 把它打成 .mpack。
+
+sources:
+  main:
+    linux/amd64: dist/realapp-linux-amd64.tar.gz
+
+params:
+  port:
+    type: port
+    default: 8080
+    description: "HTTP 监听端口"
+    restartRequired: true
+
+  log_level:
+    type: enum
+    values: [debug, info, warn, error]
+    default: info
+    description: "日志级别"
+    reloadRequired: true
+
+  # **夹具里必须有一个 secret**：`--set` 不能传明文这条纪律，没有 secret
+  # 参数的包验不出来。M8 收尾审查时发现那条纪律只存在于文档里，而当时
+  # 集群上没有任何一个带 secret 的包——夹具越干净，它掩盖的形状越多。
+  admin_password:
+    type: secret
+    description: "管理口令。只能用 --set-file 或 --set-stdin 传"
+    restartRequired: true
+
+paths:
+  conf:
+    default: "{{ .Node.Roots.etc }}/apps/{{ .Component }}"
+    mode: "0750"
+
+roles:
+  - name: server
+    cardinality: "1-N"
+    resources:
+      - user: { name: realapp, system: true }
+      - archive: { blob: main, dest: "{{ .Paths.Generation }}", strip: 1 }
+      - directory: { path: "{{ .Paths.conf }}", owner: realapp, mode: "0750" }
+      - file:
+          path: "{{ .Paths.conf }}/app.yaml"
+          owner: realapp
+          mode: "0640"
+          content: |
+            port: {{ .Params.port }}
+            level: {{ .Params.log_level }}
+    workload:
+      runtime: systemd
+      systemd:
+        exec: "{{ .Paths.Current }}/bin/webapp --config {{ .Paths.conf }}/app.yaml"
+        # log_level 声明了 reloadRequired，因此必须有 reload 命令——
+        # lint 的 R25 会当场拦住「声明了却做不到」。
+        # 用 shell 内建的 kill：/bin/kill 由 procps 提供，最小镜像里没有。
+        execReload: "/bin/sh -c 'kill -HUP $MAINPID'"
+        user: realapp
+        restart: always
+        restartSec: 5s
+    health:
+      http: { path: /healthz, port: "{{ .Params.port }}" }
+      startupGrace: 10s

@@ -1,0 +1,34 @@
+schema: pack/v1
+name: noname
+version: "1.0.0"
+revision: 1
+description: "夹具：单角色 Pack **省略 name**，角色应当叫 default"
+license: Apache-2.0
+platforms: [linux/amd64]
+
+# 规范允许单角色 Pack 省略 roles[].name，此时角色叫 default
+# （pack.Role.EffectiveName）。表单的第一版实现直接读了 r.Name，于是
+# 角色下拉框里是个空字符串——而这个缺陷 paramkit 抓不到，因为它
+# 老老实实写了 name。
+#
+# 结论写进了 23-web-ui §6.6：**照着规范的「推荐写法」造夹具，就会系统性
+# 地避开规范允许的其它写法。** 这个包的存在就是那条结论的落实。
+
+params:
+  greeting:
+    type: string
+    default: "hi"
+
+paths:
+  conf:
+    default: "{{ .Node.Roots.etc }}/noname"
+    mode: "0750"
+
+roles:
+  # 刻意不写 name
+  - cardinality: "1-N"
+    resources:
+      - file:
+          path: "{{ .Paths.conf }}/noname.conf"
+          content: "greeting={{ .Params.greeting }}\n"
+          mode: "0644"

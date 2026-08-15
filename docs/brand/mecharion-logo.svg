@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">Mecharion logo</title>
+  <desc id="desc">A precise interlocking M with a cyan lifecycle ribbon and an amber mechanical pivot.</desc>
+  <path fill="#08C7E8" d="M512 512 L878 733.491 V960.646 L512 727 L146 960.646 V733.491 Z"/>
+  <path fill="#087CF0" d="M512 286 L810.155 89.184 A105 105 0 0 1 973 176.814 V878 A95 95 0 0 1 783 878 V350 L708 390 L512 512 Z"/>
+  <path fill="#073A8C" d="M210.949 84.746 L708 390 L512 512 L241 350 V878 A95 95 0 0 1 51 878 V174.220 A105 105 0 0 1 210.949 84.746 Z"/>
+  <circle cx="512" cy="512" r="68" fill="#073A8C"/>
+  <circle cx="512" cy="512" r="50" fill="#FFB21A"/>
+</svg>

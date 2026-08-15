@@ -1,0 +1,68 @@
+schema: pack/v1
+name: go-webapp
+version: "1.2.0"
+description: "示例 Go Web 应用——单静态二进制 + systemd"
+license: Apache-2.0
+keywords: [example, webapp]
+platforms: [linux/amd64, linux/arm64]
+
+blobs:
+  main:
+    linux/amd64:
+      sha256:   "0000000000000000000000000000000000000000000000000000000000000000"
+      size:     12582912
+      filename: "webapp-1.2.0-linux-amd64.tar.gz"
+    linux/arm64:
+      sha256:   "1111111111111111111111111111111111111111111111111111111111111111"
+      size:     11534336
+      filename: "webapp-1.2.0-linux-arm64.tar.gz"
+
+params:
+  port:
+    type: port
+    default: 8080
+    description: "HTTP 监听端口"
+    restartRequired: true
+
+  log_level:
+    type: enum
+    values: [debug, info, warn, error]
+    default: info
+    description: "日志级别"
+    reloadRequired: true
+
+  max_body_size:
+    type: size
+    default: 4MB
+    description: "请求体大小上限"
+    advanced: true
+    reloadRequired: true
+
+roles:
+  - resources:
+      - user:      { name: webapp, system: true }
+      - archive:   { blob: main, dest: "{{ .Paths.Generation }}", strip: 1 }
+      - directory: { path: "{{ .Paths.Data }}", owner: webapp, mode: "0750" }
+      - template:
+          src:    app.yaml.tmpl
+          dest:   "{{ .Paths.Config }}/app.yaml"
+          owner:  webapp
+          mode:   "0640"
+          notify: reload
+
+    workload:
+      runtime: systemd
+      systemd:
+        exec:        "{{ .Paths.Current }}/bin/webapp --config {{ .Paths.Config }}/app.yaml"
+        # 用 shell 内建的 kill，不用 /bin/kill —— 后者由 procps 提供，
+        # 最小化的发行版镜像（debian:*-slim 等）里并不存在
+        execReload:  "/bin/sh -c 'kill -HUP $MAINPID'"
+        user:        webapp
+        group:       webapp
+        restart:     always
+        restartSec:  5s
+        limitNofile: 65536
+
+    health:
+      http: { path: /healthz, port: "{{ .Params.port }}" }
+      startupGrace: 15s

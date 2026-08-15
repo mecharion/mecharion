@@ -1,0 +1,133 @@
+schema: pack/v1
+name: minio
+version: "2024.8.17"
+revision: 1
+description: "MinIO 对象存储 —— 单机与分布式纠删码形态"
+homepage: "https://min.io"
+license: AGPL-3.0
+keywords: [storage, s3, object-storage]
+platforms: [linux/amd64, linux/arm64]
+
+requires:
+  os:
+    family: [debian, rhel]
+  resources:
+    memory: 2GB
+
+blobs:
+  # MinIO 发布的是裸二进制，不是归档——因此用 file.blob 而非 archive
+  main:
+    linux/amd64:
+      sha256:    "aaaa000000000000000000000000000000000000000000000000000000000000"
+      size:      104857600
+      filename:  "minio-RELEASE.2024-08-17T01-24-54Z-linux-amd64"
+      sourceUrl: "https://dl.min.io/server/minio/release/linux-amd64/minio"
+      mediaType: raw
+    linux/arm64:
+      sha256:    "bbbb000000000000000000000000000000000000000000000000000000000000"
+      size:      99614720
+      filename:  "minio-RELEASE.2024-08-17T01-24-54Z-linux-arm64"
+      mediaType: raw
+
+params:
+  api_port:
+    type: port
+    default: 9000
+    group: "网络"
+    restartRequired: true
+
+  console_port:
+    type: port
+    default: 9001
+    group: "网络"
+    restartRequired: true
+
+  root_user:
+    type: string
+    default: minioadmin
+    group: "安全"
+    restartRequired: true
+
+  root_password:
+    type: secret
+    required: true
+    group: "安全"
+    restartRequired: true
+
+paths:
+  # 数据盘 —— 本示例的核心压测点。
+  # 分布式形态下每个节点的盘数必须一致（纠删码要求），由 ConfigGroup 统一绑定。
+  dataDirs:
+    kind: multi
+    default: ["{{ .Node.Roots.data }}/apps/{{ .Component }}/data"]
+    subpath: "minio"
+    owner:   minio
+    mode:    "0750"
+
+shared:
+  resources:
+    - group: { name: minio, system: true }
+    - user:  { name: minio, system: true, group: minio, shell: /sbin/nologin }
+    # 裸二进制直接落地，无需解归档
+    - file:
+        blob:  main
+        path:  "{{ .Paths.Generation }}/bin/minio"
+        mode:  "0755"
+        owner: minio
+    - template:
+        src:    minio.env.tmpl
+        dest:   "{{ .Paths.Config }}/minio.env"
+        owner:  minio
+        mode:   "0600"
+        notify: restart
+
+roles:
+  - name: server
+    description: "MinIO 服务节点"
+    cardinality: "1-N"
+    params:
+      # ★ 本示例的核心：endpoints 需要同时枚举「所有节点」与「每节点的所有盘」。
+      # 依赖 .Topology 暴露各实例已解析的 Paths。
+      endpoints:
+        type: string
+        from: '{{ template "minio-endpoints" . }}'
+        description: "MinIO server 的端点列表"
+    workload:
+      runtime: systemd
+      systemd:
+        exec: >-
+          {{ .Paths.Current }}/bin/minio server {{ .Params.endpoints }}
+          --address :{{ .Params.api_port }}
+          --console-address :{{ .Params.console_port }}
+        user:    minio
+        group:   minio
+        envFile: "{{ .Paths.Config }}/minio.env"
+        restart: always
+        limitNofile: 65536
+        timeoutStop: 60s
+    health:
+      http: { path: /minio/health/live, port: "{{ .Params.api_port }}" }
+      startupGrace: 60s
+
+profiles:
+  - name: standalone
+    default: true
+    description: "单机，无冗余，仅供开发测试"
+    minNodes: 1
+    roles:
+      server: { cardinality: "1" }
+
+  - name: distributed
+    description: "分布式纠删码，最少 4 个盘位（节点数 × 每节点盘数 ≥ 4）"
+    minNodes: 4
+    upgradeFrom: [standalone]
+    roles:
+      server: { cardinality: "4-N" }
+    placement:
+      - antiAffinity: [server]
+        scope: node
+        enforcement: required
+        reason: "同节点多实例会争抢同一批磁盘，纠删码的容错保证失效"
+      - antiAffinity: [server]
+        scope: rack
+        enforcement: preferred

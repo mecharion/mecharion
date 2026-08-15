@@ -1,0 +1,332 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.26"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: 格式 / vet / tidy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - run: make fmt-check
+      - run: make vet
+      - run: make tidy-check
+      # 生成物提交进仓库，因此必须确认它与 .proto 一致——
+      # 改了 proto 却忘了重新生成，两端会按不同的消息格式工作。
+      # protogen 是纯 Go 的，不需要装 protoc。
+      - run: make proto-check
+      # 同一条理由用在 SQL 侧：sqlcgen 也是提交进仓库的生成物，此前
+      # 这一步只有 proto 有、sqlc 没有——改了 queries/*.sql 却忘了
+      # 重新生成，CI 照样是绿的。sqlc 不是纯 Go 的，要先装。
+      - run: make tools
+      - run: make sqlc-check
+
+  static-analysis:
+    name: 静态分析
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # gitleaks 扫 git 历史（不只是当前工作树）——默认的浅克隆只有
+          # 一个 commit，那样等于只扫了这一次 diff，扫不出历史里滚进去
+          # 又删掉的密钥。这个仓库目前才 5 个 commit，代价可以忽略。
+          fetch-depth: 0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      # staticcheck、govulncheck 的发现直接反映真实问题，全是 P0；
+      # 接进 CI 前先把现存代码里这一批清干净了，只挡新增的。
+      - run: make staticcheck
+      - run: make govulncheck
+      # gosec **刻意不阻断构建**：跑过一遍现存代码，195 处发现里绝大多数
+      # 是已知的误报模式（G104 挡的是"清理路径里 Close/Remove 的返回值
+      # 没检查"——原始错误已经在返回了，再检查清理动作的错误没有实际意义；
+      # G301/G306 挡的是这个项目里每一处权限位都经过真实威胁建模、写了
+      # 理由的选择）。盲目让它阻断 CI，换来的是要么把这些误报一一加
+      # `#nosec` 注释掩盖掉（噪音比没有还大），要么被迫接受一堆不必要的
+      # "修复"。因此按审阅原文的建议留作人工复核的信号源，不拿它卡流水线。
+      - run: make gosec
+      # secret 扫描：唯一一处发现是文档里的示例 token（字面量 "..." 结尾，
+      # 一望而知是占位符），已记在 .gitleaksignore 并写明原因。
+      - run: make gitleaks
+      # Markdown 链接检查：查本地相对路径、锚点与外部 URL；两个
+      # 已知会 404 但不是"链接写错了"的例外记在 .lychee.toml（一个是
+      # pack/v1 冻结后才会建的 mecharion/packs 仓库，另一个是需要手动
+      # 在仓库 Settings 里开一次的 Security Advisories 入口）。
+      - uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
+        with:
+          args: --no-progress --config .lychee.toml "**/*.md"
+          fail: true
+
+  webui:
+    name: Web UI 构建
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      # 产物不进仓库（ADR-0036），因此这里没有「一致性检查」可做——
+      # 能做的是**确认它还构建得出来**。前端坏了要在这一步红，
+      # 而不是等到发布时才发现打出来的 mechd 没有界面。
+      - run: make webui
+      # 构建完再编译一次：确认产物真的 embed 得进去
+      - run: go build ./cmd/mechd
+      # 前端测试（23-web-ui §4.4.7）。它守的是三条「错了会毁掉用户输入」
+      # 的规则：只提交动过的字段、有改动时停轮询、unset 与空值分开。
+      - run: npm ci
+        working-directory: webui
+      - run: npm run lint
+        working-directory: webui
+      - run: npm run test
+        working-directory: webui
+
+  test:
+    name: 测试 (${{ matrix.os }}, Go ${{ matrix.go-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # mechctl / mechpack 需在三平台可用，因此测试也跑三平台；
+        # go-version 这份列表要与下面 env.GO_VERSION 手动保持一致——
+        # strategy.matrix 求值早于 job 执行，引用不到 env 上下文。
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        go-version: ["1.26"]
+        include:
+          # 最低支持版本（README「需要 Go 1.25+」、go.mod 的 go 1.25.7）
+          # 只在 ubuntu 上单跑一次——目的是"抓到不小心用了新版本独有
+          # API"，不是三系统各测两个版本；那样矩阵翻倍，对这一条判据
+          # 没有额外收益。
+          - os: ubuntu-latest
+            go-version: "1.25"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: ${{ matrix.go-version }}
+          cache: true
+      - run: go test -race -cover ./...
+
+  build:
+    name: 交叉编译 ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 全部二进制
+          - { goos: linux,   goarch: amd64, targets: "mechctl mechpack mechd mechlet" }
+          - { goos: linux,   goarch: arm64, targets: "mechctl mechpack mechd mechlet" }
+          # 仅运维/开发者工具：mechd 与 mechlet 依赖 systemd 等 Linux 设施
+          - { goos: darwin,  goarch: amd64, targets: "mechctl mechpack" }
+          - { goos: darwin,  goarch: arm64, targets: "mechctl mechpack" }
+          - { goos: windows, goarch: amd64, targets: "mechctl mechpack" }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: 构建
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          # 单静态二进制是产品的基础性质，CGO 必须关闭
+          CGO_ENABLED: "0"
+        run: |
+          set -e
+          for b in ${{ matrix.targets }}; do
+            echo "::group::$b"
+            go build -trimpath -o /dev/null ./cmd/$b
+            echo "::endgroup::"
+          done
+
+  e2e:
+    name: 端到端（systemd 容器）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      # 软链、属主、systemd、getent 在开发机上要么不可用要么语义不同，
+      # 只有真机能验证。测试二进制在宿主机交叉编译后挂进容器——
+      # 容器里刻意没有 Go 工具链（test/node/Dockerfile）。
+      - name: 交叉编译测试二进制
+        run: ./hack/e2ebin.sh
+      - name: 启动 systemd 容器并跑测试
+        run: |
+          ./hack/testenv.sh up
+          ./hack/testenv.sh test
+      - name: 失败时导出容器日志
+        if: failure()
+        run: ./hack/testenv.sh status || true
+      - name: 清理
+        if: always()
+        run: ./hack/testenv.sh down || true
+
+  acceptance:
+    name: 里程碑验收（三节点集群）
+    runs-on: ubuntu-latest
+    # **这两套是 M7 / M9 与 M8 的验收判据本身。** 不在 CI 里跑的话，它们
+    # 只在有人手动跑时才执行——而这个项目自己记着那条教训：
+    # 「一直在跳过会被当成一直在通过」（test/multinode 包注释）。
+    #
+    # 它们比单机套件慢（起三台容器 + 真实的滚动升级要等健康门禁），
+    # 因此单列一个 job：慢的那个不该拖住快的那个。
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+      # 验收表第 21 条要「浏览器打开是真正的界面」，因此 mechd 必须带着
+      # 构建好的 UI——少了这一步，那几条判据验的是说明页
+      - run: make webui
+      - name: 交叉编译测试二进制
+        run: ./hack/e2ebin.sh
+      - name: 造一个真包（第 16–17 条要它）
+        run: ./hack/realpack.sh
+      # 这一步跑的是整个 test/multinode 包——**M7 的多节点判据 + M9 的
+      # 生命周期判据（remove / orphans / apply / restart / 失联节点）**。
+      # 名字曾经写死成「M7 多节点验收」，M9 把新测试加进同一个包之后就成了
+      # 谎话：CI 面板上看是绿的 M7，实际跑的东西多了一倍。步骤名是排障时
+      # 第一眼看到的东西，它指错地方比没有名字更费时间。
+      - name: 多节点验收（M7 + M9）
+        run: |
+          ./hack/testenv.sh cluster up
+          ./hack/testenv.sh cluster test
+      # M8 的验收套件**依赖上一步建立的集群状态**（装好的 mechd、
+      # 加入的节点）。顺序不能反——它读不到 admin.token 时会 Fatal，
+      # 那是刻意的：环境没准备好必须红，不能静默跳过。
+      - name: M8 验收表
+        run: ./hack/testenv.sh cluster webui
+      - name: 失败时导出容器日志
+        if: failure()
+        run: ./hack/testenv.sh cluster status || true
+      - name: 清理
+        if: always()
+        run: ./hack/testenv.sh cluster down || true
+
+  packs:
+    name: 示例 Pack 校验
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      # 示例是 pack/v1 规范的验收用例——它们必须始终通过含 hermetic 的 lint。
+      # --strict 让警告也算失败：示例应当是规范用法的表率。
+      - name: mechpack lint --hermetic --strict
+        run: go run ./cmd/mechpack lint --hermetic --strict examples/packs
+
+  quickstart:
+    name: README quickstart（真实容器，从零重放）
+    runs-on: ubuntu-latest
+    # quickstart 曾经用一个 sha256 是占位符的示例包，新用户照抄
+    # 部署不出东西。这条 job 逐字重放 README「单机」那一段——不是另写一份
+    # 等价脚本，是**同一段命令**，跑不通就直接把 CI 标红。
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: 构建二进制
+        run: make build
+      - name: 打包 quickstart 示例（真实二进制、真实 sha256）
+        run: ./hack/quickstartpack.sh
+      - name: 起一台跑 systemd 的真实容器
+        run: |
+          set -eu
+          docker build -t mecharion/testnode test/node
+          docker run -d --name qs --cgroupns=host \
+            -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
+            --tmpfs /run --tmpfs /run/lock --tmpfs /tmp --cap-add SYS_ADMIN \
+            --stop-signal SIGRTMIN+3 \
+            -v "$PWD/bin:/mnt/hostbin:ro" -v "$PWD/dist:/mnt/dist:ro" \
+            mecharion/testnode
+          for i in $(seq 1 30); do
+            state=$(docker exec qs systemctl is-system-running 2>/dev/null || true)
+            case "$state" in running|degraded) break ;; esac
+            sleep 1
+          done
+      - name: 逐字重放 README「单机」那几行
+        run: |
+          set -eu
+          # 测试镜像自带的 /usr/local/lib/mecharion/current 是给别的测试用的
+          # 固定挂载点（test/node/Dockerfile），不是 mechlet install 会管理
+          # 的那个软链——先清掉，否则 install 会在 rename 那步报「已存在」。
+          docker exec qs rm -rf /usr/local/lib/mecharion/current
+          docker exec qs sh -c '
+            set -eu
+            mkdir -p /usr/local/bin /root/dist
+            cp /mnt/hostbin/* /usr/local/bin/
+            chmod +x /usr/local/bin/mech*
+            ln -sf /usr/local/bin /root/bin
+            cp /mnt/dist/hello-*.mpack /root/dist/
+          '
+          docker exec -w /root qs ./bin/mechlet install --standalone
+          docker exec -w /root qs systemctl enable --now mecharion-mechd mecharion-mechlet
+          for i in $(seq 1 15); do
+            docker exec -w /root qs ./bin/mechctl component list >/dev/null 2>&1 && break
+            sleep 1
+          done
+          docker exec -w /root qs sh -c './bin/mechctl pack upload dist/hello-0.1.0-1.mpack'
+          docker exec -w /root qs sh -c './bin/mechctl component deploy hello -c web --nodes $(hostname)'
+      - name: 等收敛，确认真的部署出了一个健康的服务
+        run: |
+          set -eu
+          ok=0
+          for i in $(seq 1 30); do
+            out=$(docker exec -w /root qs ./bin/mechctl component status web -o json)
+            if echo "$out" | jq -e '.converged and (.instances[0].health == "healthy")' >/dev/null; then
+              ok=1
+              break
+            fi
+            sleep 2
+          done
+          [ "$ok" = 1 ] || { echo "30 次轮询后仍未收敛/健康" >&2; exit 1; }
+      - name: 失败时导出诊断信息
+        if: failure()
+        run: |
+          docker exec -w /root qs ./bin/mechctl component status web || true
+          docker exec qs journalctl -u mecharion-mechd --no-pager || true
+          docker exec qs journalctl -u mecharion-mechlet --no-pager || true
+          docker logs qs --tail 100 || true
+      - name: 清理
+        if: always()
+        run: docker rm -f qs || true

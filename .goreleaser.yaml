@@ -1,0 +1,155 @@
+# 发布流程配置。本地干跑（不需要 tag/token）：
+#
+#   make release-dry-run
+#
+# 真正发布靠推一个 vX.Y.Z 标签，`.github/workflows/release.yml` 接手。
+#
+# 平台矩阵与 ldflags 照抄 Makefile 的 `dist`/`LDFLAGS`——两处描述的是
+# 同一件事（"发布产物包含哪些二进制、哪些平台"），保持一致靠人工核对，
+# 这里的注释就是那个核对点。
+version: 2
+
+project_name: mecharion
+
+before:
+  hooks:
+    # tag 上的代码理应已经过 CI 的 check/check-all，这里不重新跑一遍
+    # 静态分析——那是 CI 的职责，release 流程只管"打包这份已经验证过
+    # 的代码"，重复跑一遍换不来新信息，只会让发布变慢。
+    - go mod verify
+
+builds:
+  # mechd / mechlet：只在 Linux 跑（systemd/docker runtime），对应
+  # Makefile 里的 LINUX_ONLY。
+  - id: mechd
+    main: ./cmd/mechd
+    binary: mechd
+    goos: [linux]
+    goarch: [amd64, arm64]
+    env: [CGO_ENABLED=0]
+    flags: [-trimpath]
+    ldflags: &ldflags
+      - -s -w
+      - -X github.com/mecharion/mecharion/internal/version.Version={{.Version}}
+      - -X github.com/mecharion/mecharion/internal/version.Commit={{.ShortCommit}}
+      - -X github.com/mecharion/mecharion/internal/version.Date={{.Date}}
+
+  - id: mechlet
+    main: ./cmd/mechlet
+    binary: mechlet
+    goos: [linux]
+    goarch: [amd64, arm64]
+    env: [CGO_ENABLED=0]
+    flags: [-trimpath]
+    ldflags: *ldflags
+
+  # mechctl / mechpack：跨平台客户端工具，对应 Makefile 里的 PORTABLE。
+  # 不构建 windows/arm64——Makefile 的 dist 目标从来没构建过这个组合。
+  - id: mechctl
+    main: ./cmd/mechctl
+    binary: mechctl
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    ignore:
+      - goos: windows
+        goarch: arm64
+    env: [CGO_ENABLED=0]
+    flags: [-trimpath]
+    ldflags: *ldflags
+
+  - id: mechpack
+    main: ./cmd/mechpack
+    binary: mechpack
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    ignore:
+      - goos: windows
+        goarch: arm64
+    env: [CGO_ENABLED=0]
+    flags: [-trimpath]
+    ldflags: *ldflags
+
+archives:
+  # 每个平台一个归档，装下这个平台能用的全部二进制——而不是每个
+  # 二进制单独一个归档。Linux 节点需要 mechd+mechlet+mechctl+mechpack
+  # 一起装（mechlet install --standalone 的前提），客户端机器只需要
+  # mechctl+mechpack；按平台分比按二进制分更贴近真实使用方式。
+  # `allow_different_binary_count` 是因为 mechd/mechlet 不在 darwin/
+  # windows 的构建矩阵里，各平台归档天然装的二进制数不一样。
+  - id: default
+    allow_different_binary_count: true
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - README.md
+      - LICENSE
+      - CHANGELOG.md
+
+checksum:
+  name_template: checksums.txt
+
+# SBOM：每个**二进制**一份 CycloneDX JSON（不是每个归档一份）——
+# 实测过 `artifacts: archive` 会让 syft 展开整个 tar.gz 再扫，一份
+# 4~5 分钟还扫不完；直接对着单个 Go 二进制扫只需要 <1 秒，因为 syft
+# 读的是 Go 编译期写进二进制的 buildinfo（模块依赖表），不需要展开
+# 任何东西——快本身就是它在正确读取数据的证据，不是抄近路。用本地
+# 已装好的 syft（版本见 Makefile 的 SYFT_VERSION，与这里保持一致靠
+# Makefile 里 release-tools 目标统一安装）。
+sboms:
+  - id: binary-sboms
+    artifacts: binary
+
+# 签名：cosign keyless（Sigstore OIDC，绑定 GitHub Actions 的工作流身份），
+# 不维护长期私钥——单人维护的项目额外背一套密钥管理，换不来与
+# ADR-0040 论证 Pack 签名时同一条理由对称的收益。只签 checksums.txt
+# 一份：它记录了全部归档与 SBOM 的哈希，验证这一份文件签名，等于
+# 传递验证了它引用的全部文件。
+signs:
+  - id: checksums
+    cmd: cosign
+    signature: "${artifact}.sig"
+    certificate: "${artifact}.pem"
+    args:
+      - sign-blob
+      - --yes
+      - --output-signature=${signature}
+      - --output-certificate=${certificate}
+      - ${artifact}
+    artifacts: checksum
+
+# 变更日志：这个项目此前的提交历史是大颗粒度的里程碑式提交
+# （decision-log.md 记过这个教训，约定"以后改"，不能回填过去的提交），
+# 不遵循 conventional commits 前缀，因此不按类型
+# 分组，只按时间顺序列出——分组质量会随以后的提交粒度改善而自然
+# 改善。人工维护的 CHANGELOG.md 承担"这次发布真正值得知道什么"，
+# 这里的自动列表承担"完整、不遗漏"。
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^Merge "
+
+release:
+  prerelease: auto
+  name_template: "{{.ProjectName}} {{.Version}}"
+  header: |
+    完整变更历史见 [CHANGELOG.md](https://github.com/mecharion/mecharion/blob/{{ .Tag }}/CHANGELOG.md)。
+  footer: |
+    ## 校验制品
+
+    ```bash
+    # 校验签名（cosign keyless；确认签名者确实是本仓库的 release workflow）
+    cosign verify-blob checksums.txt \
+      --signature checksums.txt.sig --certificate checksums.txt.pem \
+      --certificate-identity-regexp 'https://github.com/mecharion/mecharion/\.github/workflows/release\.yml@.*' \
+      --certificate-oidc-issuer https://token.actions.githubusercontent.com
+
+    # 校验下载的归档与 checksums.txt 一致
+    sha256sum -c checksums.txt --ignore-missing
+    ```
+
+    Pack 信任是运维方自己的责任（[ADR-0040](https://github.com/mecharion/mecharion/blob/main/docs/adr/0040-pack-trust-is-operator-responsibility.md)）——以上校验的是「这份发布制品确实由本仓库的 CI 构建、没有被篡改」，不是「装进去的 Pack 内容可信」，两者是不同的问题。

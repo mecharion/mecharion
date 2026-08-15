@@ -1,0 +1,9 @@
+# 由 Mecharion 渲染，请勿手工编辑
+# 客户端连接配置 —— 由 client 角色分发到应用节点
+
+{{- if eq .Profile "kraft-combined" }}
+bootstrap.servers={{ range $i, $n := .Topology.Role "combined" }}{{ if $i }},{{ end }}{{ $n.Address }}:{{ $.Params.client_port }}{{ end }}
+{{- else }}
+bootstrap.servers={{ range $i, $n := .Topology.Role "broker" }}{{ if $i }},{{ end }}{{ $n.Address }}:{{ $.Params.client_port }}{{ end }}
+{{- end }}
+security.protocol=PLAINTEXT

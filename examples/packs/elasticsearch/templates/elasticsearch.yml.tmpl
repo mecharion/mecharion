@@ -1,0 +1,34 @@
+# 由 Mecharion 渲染，请勿手工编辑
+# Component: {{ .Component }}  Profile: {{ .Profile }}  Generation: {{ .Generation.Seq }}
+
+cluster.name: {{ .Params.cluster_name }}
+node.name: {{ .Node.Name }}
+
+path.data: {{ join "," .Paths.DataDirs }}
+path.logs: {{ .Paths.Logs }}
+
+network.host: 0.0.0.0
+http.port: {{ .Params.http_port }}
+transport.port: {{ .Params.transport_port }}
+
+bootstrap.memory_lock: true
+indices.memory.index_buffer_size: {{ .Params.indices_memory_pct }}%
+
+{{- if eq .Profile "single-node" }}
+
+discovery.type: single-node
+{{- else }}
+
+discovery.seed_hosts:
+{{- range .Topology.Role "node" }}
+  - {{ .Address }}:{{ $.Params.transport_port }}
+{{- end }}
+
+# 首次启动的集群引导节点列表；集群成型后 ES 会忽略此项
+cluster.initial_master_nodes:
+{{- range .Topology.Role "node" }}
+  - {{ .Name }}
+{{- end }}
+{{- end }}
+
+xpack.security.enabled: false

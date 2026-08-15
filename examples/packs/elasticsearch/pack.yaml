@@ -1,0 +1,182 @@
+schema: pack/v1
+name: elasticsearch
+version: "8.15.0"
+revision: 1
+description: "Elasticsearch —— 支持单节点与多节点集群"
+homepage: "https://www.elastic.co"
+license: Elastic-2.0
+keywords: [search, analytics, elasticsearch]
+platforms: [linux/amd64, linux/arm64]
+
+# ES 跨大版本升级需先完成 reindex / 兼容性检查，不能直接换 generation
+upgradePolicy:
+  compatible: "~8"
+
+requires:
+  os:
+    family: [debian, rhel]
+  resources:
+    memory: 2GB
+    diskFree: 20GB
+  # ES 自带 JDK，因此无 packs 依赖——这与 kafka/hdfs 形成对照
+
+blobs:
+  main:
+    linux/amd64:
+      sha256:    "8888888888888888888888888888888888888888888888888888888888888888"
+      size:      618659840
+      filename:  "elasticsearch-8.15.0-linux-x86_64.tar.gz"
+      sourceUrl: "https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-8.15.0-linux-x86_64.tar.gz"
+    linux/arm64:
+      sha256:    "9999999999999999999999999999999999999999999999999999999999999999"
+      size:      612368384
+      filename:  "elasticsearch-8.15.0-linux-aarch64.tar.gz"
+
+params:
+  cluster_name:
+    type: string
+    default: "mecharion-es"
+    pattern: "^[a-zA-Z0-9_-]+$"
+    immutable: true
+
+  http_port:
+    type: port
+    default: 9200
+    group: "网络"
+    restartRequired: true
+
+  transport_port:
+    type: port
+    default: 9300
+    group: "网络"
+    restartRequired: true
+
+  heap:
+    type: size
+    # ES 官方建议：物理内存的一半，且不超过 31GB（超过则失去压缩对象指针）。
+    # 这是 defaultFrom 最典型的用例——固定默认值在此几乎必然是错的。
+    defaultFrom: '{{ min (div .Node.Facts.Memory.Total 2) "31GB" }}'
+    default: 1GB
+    description: "JVM 堆，默认为物理内存的一半且不超过 31GB"
+    group: "性能"
+    restartRequired: true
+
+  indices_memory_pct:
+    type: int
+    default: 10
+    min: 1
+    max: 50
+    unit: "%"
+    description: "索引缓冲占堆的比例"
+    group: "性能"
+    advanced: true
+    restartRequired: true
+
+paths:
+  # ES 要求配置位于 $ES_HOME/config，且 ES 会写入其中（keystore）
+  config:
+    default:  "{{ .Node.Roots.etc }}/apps/{{ .Component }}"
+    linkInto: "{{ .Paths.Generation }}/config"
+    distDir:  "config"
+    owner:    elasticsearch
+    mode:     "0750"
+
+  # ES 在 $ES_HOME/plugins 下安装插件，必须可写且跨版本存活
+  plugins:
+    default:  "{{ .Node.Roots.data }}/apps/{{ .Component }}/plugins"
+    linkInto: "{{ .Paths.Generation }}/plugins"
+    distDir:  "plugins"
+    owner:    elasticsearch
+    mode:     "0750"
+
+  dataDirs:
+    kind: multi
+    default: ["{{ .Node.Roots.data }}/apps/{{ .Component }}/data"]
+    subpath: "es/data"
+    owner:   elasticsearch
+    mode:    "0750"
+
+  logs:
+    default:  "{{ .Node.Roots.logs }}/apps/{{ .Component }}"
+    linkInto: "{{ .Paths.Generation }}/logs"
+    owner:    elasticsearch
+    mode:     "0750"
+
+shared:
+  resources:
+    - group: { name: elasticsearch, system: true }
+    - user:  { name: elasticsearch, system: true, group: elasticsearch, shell: /sbin/nologin }
+    - archive: { blob: main, dest: "{{ .Paths.Generation }}", strip: 1 }
+
+    # ES 硬性要求，不满足则拒绝启动
+    - sysctl: { key: vm.max_map_count, value: "262144" }
+    - limits: { domain: elasticsearch, item: nofile,  soft: 65535, hard: 65535 }
+    - limits: { domain: elasticsearch, item: memlock, soft: unlimited, hard: unlimited }
+
+    - template:
+        src:    elasticsearch.yml.tmpl
+        dest:   "{{ .Paths.Config }}/elasticsearch.yml"
+        owner:  elasticsearch
+        mode:   "0640"
+        notify: restart
+    - template:
+        src:    jvm.options.tmpl
+        dest:   "{{ .Paths.Config }}/jvm.options.d/mecharion.options"
+        owner:  elasticsearch
+        mode:   "0640"
+        notify: restart
+
+roles:
+  - name: node
+    description: "ES 节点（单节点形态下承担全部职责）"
+    cardinality: "1-N"
+    workload:
+      runtime: systemd
+      systemd:
+        exec:  "{{ .Paths.Current }}/bin/elasticsearch"
+        user:  elasticsearch
+        group: elasticsearch
+        env:
+          ES_PATH_CONF: "{{ .Paths.Config }}"
+        restart: always
+        limitNofile: 65535
+        timeoutStop: 180s
+        extraUnit: |
+          LimitMEMLOCK=infinity
+    health:
+      http: { path: /_cluster/health, port: "{{ .Params.http_port }}", expectStatus: [200] }
+      startupGrace: 180s
+      interval: 20s
+
+  - name: client
+    description: "客户端配置分发"
+    cardinality: "0-N"
+    resources:
+      - template:
+          src:  client.env.tmpl
+          dest: "{{ .Paths.Config }}/client.env"
+          mode: "0644"
+
+profiles:
+  - name: single-node
+    default: true
+    description: "单节点，无副本，仅供开发测试"
+    minNodes: 1
+    roles:
+      node: { cardinality: "1" }
+
+  - name: cluster
+    description: "多节点集群，自动分片与副本"
+    minNodes: 3
+    upgradeFrom: [single-node]
+    roles:
+      node: { cardinality: "3-N" }
+    placement:
+      - antiAffinity: [node]
+        scope: node
+        enforcement: required
+        reason: "同节点多实例会争抢内存锁与数据盘，且失去容错意义"
+      - antiAffinity: [node]
+        scope: rack
+        enforcement: preferred
+        reason: "跨机架分散可在整机架故障时保住多数派"

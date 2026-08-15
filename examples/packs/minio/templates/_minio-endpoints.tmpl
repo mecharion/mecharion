@@ -1,0 +1,19 @@
+{{- /*
+  MinIO 的 server 参数需要列出集群中每个节点的每块盘：
+    http://n1:9000/data1 http://n1:9000/data2 http://n2:9000/data1 …
+
+  这要求 .Topology 的每个条目暴露该实例**已解析的**路径——
+  节点之间的盘路径可以不同（不同机器挂载点不一样），因此不能用本机的
+  .Paths.DataDirs 去推断别人的。
+*/ -}}
+{{- define "minio-endpoints" -}}
+{{- $port := .Params.api_port -}}
+{{- $first := true -}}
+{{- range .Topology.Role "server" -}}
+{{- $node := . -}}
+{{- range .Paths.DataDirs -}}
+{{- if $first }}{{ $first = false }}{{ else }} {{ end -}}
+http://{{ $node.Address }}:{{ $port }}{{ . }}
+{{- end -}}
+{{- end -}}
+{{- end -}}

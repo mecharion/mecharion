@@ -1,0 +1,20 @@
+{
+  "data-root": "{{ .Params.data_root }}",
+  "pidfile": "{{ .Params.pidfile }}",
+  "storage-driver": "{{ .Params.storage_driver }}",
+  "hosts": ["unix://{{ .Params.socket }}"],
+  "log-driver": "{{ .Params.log_driver }}",
+  "log-opts": {
+    "max-size": "{{ .Params.log_max_size }}",
+    "max-file": "{{ .Params.log_max_file }}"
+  },
+  "live-restore": {{ .Params.live_restore }},
+  "iptables": {{ .Params.iptables }},
+{{- if .Params.bridge }}
+  "bridge": "{{ .Params.bridge }}",
+{{- end }}
+  "default-address-pools": [
+    { "base": "{{ .Params.default_address_pools }}", "size": 24 }
+  ],
+  "features": { "buildkit": true }
+}

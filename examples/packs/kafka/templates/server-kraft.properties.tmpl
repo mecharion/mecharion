@@ -1,0 +1,48 @@
+# 由 Mecharion 渲染，请勿手工编辑
+# Component: {{ .Component }}  Role: {{ .Role }}  Profile: {{ .Profile }}
+
+{{- /* 三种角色共用本模板，process.roles 由角色名决定 */}}
+{{- $isController := or (eq .Role "controller") (eq .Role "combined") }}
+{{- $isBroker     := or (eq .Role "broker")     (eq .Role "combined") }}
+
+{{- if eq .Role "combined" }}
+process.roles=broker,controller
+{{- else if eq .Role "controller" }}
+process.roles=controller
+{{- else }}
+process.roles=broker
+{{- end }}
+
+# node.id 必须全集群唯一且稳定。ordinal 按节点名排序，稳定不变；
+# 分离模式下 controller 与 broker 是两个独立序列，因此给 broker 加偏移。
+{{- if eq .Role "broker" }}
+node.id={{ add .Topology.Ordinal 100 }}
+{{- else }}
+node.id={{ .Topology.Ordinal }}
+{{- end }}
+
+# controller quorum：合并模式取全部 combined，分离模式取全部 controller
+{{- if eq .Profile "kraft-combined" }}
+controller.quorum.voters={{ range $i, $n := .Topology.Role "combined" }}{{ if $i }},{{ end }}{{ $i }}@{{ $n.Address }}:{{ $.Params.controller_port }}{{ end }}
+{{- else }}
+controller.quorum.voters={{ range $i, $n := .Topology.Role "controller" }}{{ if $i }},{{ end }}{{ $i }}@{{ $n.Address }}:{{ $.Params.controller_port }}{{ end }}
+{{- end }}
+
+listeners={{ if $isBroker }}PLAINTEXT://0.0.0.0:{{ .Params.client_port }}{{ end }}{{ if and $isBroker $isController }},{{ end }}{{ if $isController }}CONTROLLER://0.0.0.0:{{ .Params.controller_port }}{{ end }}
+{{- if $isBroker }}
+advertised.listeners=PLAINTEXT://{{ .Node.Address }}:{{ .Params.client_port }}
+{{- end }}
+controller.listener.names=CONTROLLER
+listener.security.protocol.map=PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+inter.broker.listener.name=PLAINTEXT
+
+{{ if $isController -}}
+metadata.log.dir={{ .Paths.MetadataDir }}
+{{ end -}}
+log.dirs={{ join "," .Paths.LogDirs }}
+
+num.partitions={{ .Params.num_partitions }}
+default.replication.factor={{ .Params.default_replication_factor }}
+offsets.topic.replication.factor={{ .Params.default_replication_factor }}
+transaction.state.log.replication.factor={{ .Params.default_replication_factor }}
+log.retention.hours={{ div .Params.log_retention.Seconds 3600 }}

@@ -1,0 +1,35 @@
+# Markdown 链接检查配置（20260809 全面审阅 REV-020；REV-021 修复失效
+# ADR 链接时就记下了这条待办）。
+#
+# 覆盖仓库内全部 .md：本地相对路径 + 锚点（`file.md#标题锚点`）与外部
+# URL 都查——本地链接失效是这个仓库反复出现过的真实问题（REV-021 一次
+# 修了 5 处），外部 URL 腐烂同样值得拦。
+#
+# **锚点检查默认是关的，必须显式打开**：lychee 的 `--include-fragments`
+# 不给值时才默认成 anchor-only，完全不给这个参数等于锚点检查整个不跑——
+# 只查"文件存不存在"，查不出"文件存在但标题改了、锚点对不上"这类错误。
+# C3 接这个工具时漏了这一步，直到 D2 顺手改标题撞出 4 处真实失效锚点
+# 才发现——早先"验证过 B8 修复"的说法因此不成立，一并在 D2 的开发日志
+# 里更正。
+include_fragments = "anchor-only"
+
+exclude_path = [
+    "webui/node_modules",
+    "bin",
+    "dist",
+]
+
+# 两个已知会 404、但不是"链接写错了"的例外，都是这个项目自己知道、
+# 还没到时间处理的事，不是新用户的当务之急：
+exclude = [
+    # examples/packs/README.md：pack/v1 冻结后官方 Pack 才会迁到这个仓库
+    # （见 examples/packs/README.md 自己的说明），仓库现在确实还没建。
+    "https://github.com/mecharion/packs",
+    # SECURITY.md：GitHub 的 Private vulnerability reporting 需要在仓库
+    # Settings 里手动开一次才会出现这个入口（C2 REV-024 收尾时记过），
+    # 开之前这个链接必然 404。
+    "https://github.com/mecharion/mecharion/security/advisories/new",
+]
+
+timeout = 10
+max_retries = 2

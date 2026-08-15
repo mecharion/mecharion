@@ -1,0 +1,232 @@
+schema: pack/v1
+name: docker
+version: "27.3.1"
+revision: 1
+description: "Docker Engine —— 用 systemd runtime 离线装出 dockerd，为 docker/compose runtime 提供运行底座"
+homepage: "https://docs.docker.com/engine/install/binaries/"
+license: Apache-2.0
+keywords: [docker, container, runtime, engine]
+platforms: [linux/amd64, linux/arm64]
+
+# Docker 的 27.x 之间可以直接换 generation。跨大版本要人看一眼：
+# 27→28 动过 API 版本协商与默认网络行为。
+upgradePolicy:
+  compatible: "~27"
+
+requires:
+  os:
+    family: [debian, rhel]
+    # 官方静态包按 glibc 构建
+    glibc: ">=2.17"
+
+# 官方静态包，解开后是一个 docker/ 目录，里面是全部二进制：
+#
+#   docker  dockerd  containerd  containerd-shim-runc-v2
+#   ctr     runc     docker-init docker-proxy
+#
+# **必须用静态包而不是发行版仓库**：`package` 资源需要 repo，会被
+# `lint --hermetic` 拦掉（ADR-0015）。这也正是本 Pack 存在的理由——
+# 一台连不上任何仓库的机器要装出 dockerd，只能靠这条路。
+blobs:
+  main:
+    linux/amd64:
+      sha256:    "0000dddd00000000000000000000000000000000000000000000000000000000"
+      size:      74532864
+      filename:  "docker-27.3.1.tgz"
+      sourceUrl: "https://download.docker.com/linux/static/stable/x86_64/docker-27.3.1.tgz"
+    linux/arm64:
+      sha256:    "1111dddd00000000000000000000000000000000000000000000000000000000"
+      size:      71303168
+      filename:  "docker-27.3.1-aarch64.tgz"
+      sourceUrl: "https://download.docker.com/linux/static/stable/aarch64/docker-27.3.1.tgz"
+
+params:
+  socket:
+    type: path
+    default: /var/run/docker.sock
+    description: "dockerd 监听的 unix socket；改它等于换一台 daemon"
+    restartRequired: true
+    group: "监听"
+
+  pidfile:
+    type: path
+    default: /var/run/docker.pid
+    description: >-
+      dockerd 的 pid 文件。**与 socket、data_root 一起构成「哪一台 daemon」**——
+      三者只改两个的话，dockerd 会以「process with PID x is still running」
+      拒绝启动，而那句话完全没提是 pidfile 撞了。preInstall 会先拦住这种情况。
+    restartRequired: true
+    advanced: true
+    group: "监听"
+
+  data_root:
+    type: path
+    default: /var/lib/docker
+    description: "镜像与容器的存储根。**换它等于换一台 daemon**——旧的镜像与容器不会跟过去"
+    restartRequired: true
+    group: "存储"
+
+  storage_driver:
+    type: enum
+    values: [overlay2, vfs, btrfs, zfs]
+    default: overlay2
+    description: "存储驱动。overlay2 是唯一在所有主流内核上都可用的选择；vfs 只用于 overlay 不可用的嵌套场景（慢但总能跑）"
+    restartRequired: true
+    group: "存储"
+
+  log_driver:
+    type: enum
+    values: [json-file, local, journald]
+    default: json-file
+    description: "容器日志驱动"
+    restartRequired: true
+    group: "日志"
+
+  log_max_size:
+    type: size
+    default: 100MB
+    description: "单个日志文件上限。**默认必须设**：不设的话一个刷日志的容器能把磁盘写满，而那台机器上所有组件一起死"
+    restartRequired: true
+    group: "日志"
+
+  log_max_file:
+    type: int
+    default: 3
+    min: 1
+    description: "日志文件保留个数"
+    restartRequired: true
+    group: "日志"
+
+  live_restore:
+    type: bool
+    default: true
+    description: "daemon 重启时容器继续跑。**升级 docker 不该顺带重启用户的服务**"
+    restartRequired: true
+    group: "可用性"
+
+  iptables:
+    type: bool
+    default: true
+    description: "由 dockerd 管理 iptables 规则。嵌套或与其它网络方案共存时才关"
+    restartRequired: true
+    advanced: true
+    group: "网络"
+
+  bridge:
+    type: string
+    default: ""
+    description: >-
+      自定义网桥名；留空用 docker 默认的 docker0。
+      **填 none 会让这台 daemon 在启动时清掉本机已有的 docker0**——
+      与既有 docker 共存时这会打断对方全部容器的网络，症状是对方报
+      「adding interface vethX to bridge docker0 failed: Device does not exist」。
+      填自定义名字则要求那个网桥**已经手工建好**（dockerd 不会替你建）。
+    restartRequired: true
+    advanced: true
+    group: "网络"
+
+  default_address_pools:
+    type: string
+    default: "172.80.0.0/16"
+    description: "自定义网络的地址池。默认值避开 172.17/172.18——那两段常与既有的 VPN、K8s 网段撞车"
+    restartRequired: true
+    advanced: true
+    group: "网络"
+
+  install_cli_links:
+    type: bool
+    default: true
+    description: "把 docker CLI 链到 /usr/local/bin。多个 docker 共存时应保持 false"
+
+  cli_link_dir:
+    type: path
+    default: /usr/local/bin
+    description: "CLI 软链的落点"
+    advanced: true
+
+roles:
+  - name: engine
+    description: "dockerd 与它的全套配套二进制"
+    # 0-N：一台机器上装或不装都合理，装了也只装一份
+    cardinality: "0-N"
+
+    resources:
+      # ① 二进制。strip: 1 剥掉官方包里的 docker/ 那一层
+      - archive: { blob: main, dest: "{{ .Paths.Generation }}", strip: 1 }
+
+      # ② 数据根。**属主必须是 root、权限 0710**——docker 的镜像层里
+      #    有别的容器的文件，放宽会变成一条越权读取的路径
+      - directory: { path: "{{ .Params.data_root }}", owner: root, group: root, mode: "0710" }
+
+      # ③ daemon.json
+      - template:
+          src:    daemon.json.tmpl
+          dest:   "{{ .Paths.Config }}/daemon.json"
+          owner:  root
+          mode:   "0644"
+          notify: restart
+
+      # ④ CLI 软链。指向 current 而非 generation——**升级后不必重新链**
+      - symlink:
+          path:   "{{ .Params.cli_link_dir }}/docker"
+          target: "{{ .Paths.Current }}/docker"
+          force:  true
+          when:   "{{ .Params.install_cli_links }}"
+
+    workload:
+      runtime: systemd
+      systemd:
+        # --config-file 指到我们渲染的那份，而不是 /etc/docker/daemon.json：
+        # 后者可能是用户手工装的 docker 留下的，两份配置互相覆盖是很难查的现场
+        exec: "{{ .Paths.Current }}/dockerd --config-file {{ .Paths.Config }}/daemon.json"
+        # dockerd 支持 SIGHUP 重载**一部分**配置，但不包括 data-root、
+        # storage-driver 这些真正会变的。声明成 reload 会让人以为改了就生效，
+        # 因此故意不声明——所有参数都标 restartRequired
+        user:  root
+        # PATH 必须显式给：dockerd 在运行期 exec containerd / runc /
+        # docker-proxy / docker-init，它们只在 generation 目录里。
+        # 少了这一行的表现是「daemon 起来了，但一 run 容器就报找不到 runc」
+        env:
+          PATH: "{{ .Paths.Current }}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        restart:     always
+        restartSec:  5s
+        # 容器的 fd 记在 daemon 账上，65536 很容易不够
+        limitNofile: 1048576
+        # process：只杀 dockerd 自己。**杀整个 cgroup 会连容器一起杀掉**，
+        # 那正是 live-restore 要避免的事
+        killMode:    process
+        timeoutStop: 30s
+        extraUnit: |
+          # dockerd 要自己管理子 cgroup（容器都在里面），
+          # 不 Delegate 的话 systemd 会把它们收编，容器的资源限制随即失效
+          Delegate=yes
+          TasksMax=infinity
+          LimitNPROC=infinity
+          LimitCORE=infinity
+          # 启动可能很久：live-restore 恢复容器、overlay2 首次初始化都要时间
+          TimeoutStartSec=0
+          # 内存压力下先杀容器，别杀 daemon —— daemon 死了谁也救不回来
+          OOMScoreAdjust=-500
+
+    health:
+      # 走 CLI 而不是 TCP 探针：unix socket 连得上只说明进程在。
+      # `docker version` 要**拿到 Server 段**才返回 0——连不上 daemon 时
+      # 它打印客户端信息后以 1 退出。这正是「API 真的能应答」的判据。
+      #
+      # 不加 --format：那要写字面的 {{ }}，而渲染流水线会把它当模板求值。
+      # 退出码本身已经够了。
+      exec:
+        command: ["{{ .Paths.Current }}/docker", "-H", "unix://{{ .Params.socket }}", "version"]
+      startupGrace:     60s
+      interval:         30s
+      timeout:          10s
+      failureThreshold: 3
+
+    hooks:
+      # 装之前先看清楚这台机器上有没有别人装的 docker。
+      # 两个 daemon 抢同一个 socket 或同一个 data-root，症状是随机的
+      # 「容器莫名消失」——那种现场几乎查不出来
+      preInstall: hooks/pre-install.sh
+      # 停之前把还在跑的容器数量记进日志。停 dockerd 会带走它们
+      # （除非 live-restore），排障时要知道当时有多少东西被影响
+      preStop: hooks/pre-stop.sh

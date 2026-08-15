@@ -1,0 +1,13 @@
+# 由 Mecharion 渲染，请勿手工编辑
+# Component: {{ .Component }}  Generation: {{ .Generation.Seq }}
+
+server:
+  listen: "0.0.0.0:{{ .Params.port }}"
+  maxBodySize: {{ .Params.max_body_size.Bytes }}
+
+log:
+  level: {{ .Params.log_level }}
+  path:  {{ .Paths.Logs }}/webapp.log
+
+storage:
+  dir: {{ .Paths.Data }}

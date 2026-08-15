@@ -1,0 +1,211 @@
+schema: pack/v1
+name: zookeeper
+version: "3.9.2"
+revision: 1
+description: "Apache ZooKeeper —— 分布式协调服务，被 HDFS HA / Kafka 依赖"
+homepage: "https://zookeeper.apache.org"
+license: Apache-2.0
+keywords: [coordination, consensus, zookeeper]
+platforms: [linux/amd64, linux/arm64]
+
+requires:
+  os:
+    family: [debian, rhel]
+  packs:
+    - { name: jdk11, version: ">=11.0.20", scope: node }
+  resources:
+    memory: 1GB
+
+blobs:
+  main:
+    linux/amd64:
+      sha256:    "eeee000000000000000000000000000000000000000000000000000000000000"
+      size:      13631488
+      filename:  "apache-zookeeper-3.9.2-bin.tar.gz"
+      sourceUrl: "https://archive.apache.org/dist/zookeeper/zookeeper-3.9.2/apache-zookeeper-3.9.2-bin.tar.gz"
+    linux/arm64:
+      sha256:    "ffff000000000000000000000000000000000000000000000000000000000000"
+      size:      13631488
+      filename:  "apache-zookeeper-3.9.2-bin.tar.gz"
+
+# ── 对外导出：消费方引用它，而不是伸手进本 Pack 的角色内部 ──────────────
+exports:
+  client:
+    description: "客户端连接串"
+    role: server
+    port: "{{ .Params.client_port }}"
+    separator: ","
+
+  quorum:
+    description: "仲裁端口连接串"
+    role: server
+    port: "{{ .Params.quorum_port }}"
+    separator: ","
+
+params:
+  client_port:
+    type: port
+    default: 2181
+    group: "网络"
+    restartRequired: true
+
+  quorum_port:
+    type: port
+    default: 2888
+    group: "网络"
+    advanced: true
+    restartRequired: true
+
+  election_port:
+    type: port
+    default: 3888
+    group: "网络"
+    advanced: true
+    restartRequired: true
+
+  tick_time:
+    type: duration
+    default: 2s
+    advanced: true
+    restartRequired: true
+
+  init_limit:
+    type: int
+    default: 10
+    advanced: true
+    restartRequired: true
+
+  sync_limit:
+    type: int
+    default: 5
+    advanced: true
+    restartRequired: true
+
+  max_client_cnxns:
+    type: int
+    default: 60
+    min: 10
+    advanced: true
+    restartRequired: true
+
+  autopurge_snap_retain:
+    type: int
+    default: 3
+    min: 3
+    advanced: true
+    restartRequired: true
+
+  heap:
+    type: size
+    defaultFrom: '{{ min (div .Node.Facts.Memory.Total 4) "4GB" }}'
+    default: 1GB
+    group: "性能"
+    restartRequired: true
+
+paths:
+  config:
+    default:  "{{ .Node.Roots.etc }}/apps/{{ .Component }}"
+    linkInto: "{{ .Paths.Generation }}/conf"
+    distDir:  "conf"
+    owner:    zookeeper
+    mode:     "0750"
+
+  # 快照目录
+  data:
+    default: "{{ .Node.Roots.data }}/apps/{{ .Component }}/data"
+    owner:   zookeeper
+    mode:    "0700"
+
+  # 事务日志目录 —— ZooKeeper 强烈建议与快照分盘，写入模式完全不同
+  dataLogDir:
+    default: "{{ .Node.Roots.data }}/apps/{{ .Component }}/txnlog"
+    owner:   zookeeper
+    mode:    "0700"
+
+shared:
+  resources:
+    - group: { name: zookeeper, system: true }
+    - user:  { name: zookeeper, system: true, group: zookeeper, shell: /sbin/nologin }
+    - archive: { blob: main, dest: "{{ .Paths.Generation }}", strip: 1 }
+
+roles:
+  - name: server
+    description: "ZooKeeper 服务节点"
+    cardinality: "1-N"
+    # 本角色构成多数派仲裁。引擎据此：
+    #   ① 建议实例数为奇数（偶数只告警，不拒绝——偶数能跑，只是浪费一个节点）
+    #   ② Rollout 强制 maxUnavailable ≤ (N-1)/2，滚动重启永不打破仲裁
+    quorum: true
+
+    resources:
+      - file:
+          # myid 必须与 zoo.cfg 中的 server.N 编号一致。ordinal 从 0 起，ZK 从 1 起。
+          path:    "{{ .Paths.Data }}/myid"
+          content: "{{ add .Topology.Ordinal 1 }}"
+          owner:   zookeeper
+          mode:    "0644"
+      - template:
+          src:    zoo.cfg.tmpl
+          dest:   "{{ .Paths.Config }}/zoo.cfg"
+          owner:  zookeeper
+          mode:   "0640"
+          notify: restart
+      - template:
+          src:    java.env.tmpl
+          dest:   "{{ .Paths.Config }}/java.env"
+          owner:  zookeeper
+          mode:   "0640"
+          notify: restart
+
+    workload:
+      runtime: systemd
+      systemd:
+        exec:  "{{ .Paths.Current }}/bin/zkServer.sh start-foreground"
+        user:  zookeeper
+        group: zookeeper
+        env:
+          ZOO_LOG_DIR: "{{ .Paths.Logs }}"
+          ZOOCFGDIR:   "{{ .Paths.Config }}"
+        restart:     always
+        restartSec:  5s
+        limitNofile: 65536
+        timeoutStop: 60s
+
+    health:
+      exec:
+        command: ["/bin/sh", "-c", "echo ruok | timeout 3 nc 127.0.0.1 {{ .Params.client_port }} | grep -q imok"]
+      startupGrace: 45s
+      interval: 15s
+
+  - name: client
+    description: "客户端配置分发，不启动进程"
+    cardinality: "0-N"
+    resources:
+      - template:
+          src:  zk-client.env.tmpl
+          dest: "{{ .Paths.Config }}/client.env"
+          mode: "0644"
+
+profiles:
+  - name: standalone
+    default: true
+    description: "单节点，无仲裁，仅供开发测试"
+    minNodes: 1
+    roles:
+      server: { cardinality: "1" }
+
+  - name: ensemble
+    description: "多节点仲裁集群，建议 3 / 5 / 7 个节点"
+    minNodes: 3
+    upgradeFrom: [standalone]
+    roles:
+      server: { cardinality: "3-N" }
+    placement:
+      - antiAffinity: [server]
+        scope: node
+        enforcement: required
+        reason: "同节点多实例会让单机故障直接打破仲裁"
+      - antiAffinity: [server]
+        scope: rack
+        enforcement: preferred
+        reason: "跨机架分散可在整机架故障时保住多数派"

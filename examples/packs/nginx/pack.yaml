@@ -1,0 +1,118 @@
+schema: pack/v1
+name: nginx
+version: "1.26.2"
+revision: 1
+description: "nginx —— 静态构建，零外部依赖"
+homepage: "https://nginx.org"
+license: BSD-2-Clause
+keywords: [web, proxy, http]
+platforms: [linux/amd64, linux/arm64]
+
+requires:
+  os:
+    family: [debian, rhel]
+
+blobs:
+  # 静态链接构建：不依赖宿主机的 openssl / pcre / zlib。
+  # 这是 hermetic 约束下处理动态库依赖的首选方式。
+  main:
+    linux/amd64:
+      sha256:    "cccc000000000000000000000000000000000000000000000000000000000000"
+      size:      2097152
+      filename:  "nginx-1.26.2-static-linux-amd64.tar.gz"
+      sourceUrl: "https://nginx.org/download/nginx-1.26.2.tar.gz"
+    linux/arm64:
+      sha256:    "dddd000000000000000000000000000000000000000000000000000000000000"
+      size:      2031616
+      filename:  "nginx-1.26.2-static-linux-arm64.tar.gz"
+
+params:
+  http_port:
+    type: port
+    default: 80
+    group: "网络"
+    reloadRequired: true
+
+  worker_processes:
+    type: string
+    default: "auto"
+    description: "worker 进程数，auto 表示按 CPU 核数"
+    reloadRequired: true
+
+  worker_connections:
+    type: int
+    default: 1024
+    min: 128
+    max: 65536
+    advanced: true
+    reloadRequired: true
+
+  client_max_body_size:
+    type: size
+    default: 1MB
+    reloadRequired: true
+
+  keepalive_timeout:
+    type: duration
+    default: 65s
+    advanced: true
+    reloadRequired: true
+
+  server_name:
+    type: string
+    default: "_"
+    reloadRequired: true
+
+paths:
+  # nginx 用 -c 指定配置，因此配置可以完全独立于安装目录——
+  # 与 Kafka/ES 形成对照，这里不需要 linkInto。
+  config:
+    default: "{{ .Node.Roots.etc }}/apps/{{ .Component }}"
+    owner:   nginx
+    mode:    "0750"
+
+  # nginx 运行期写入 client_body_temp / proxy_temp 等
+  runtime:
+    default:  "/run/mecharion/apps/{{ .Component }}"
+    linkInto: "{{ .Paths.Generation }}/tmp"
+    owner:    nginx
+    mode:     "0700"
+
+  webroot:
+    default: "{{ .Node.Roots.data }}/apps/{{ .Component }}/html"
+    owner:   nginx
+    mode:    "0755"
+
+roles:
+  - resources:
+      - group: { name: nginx, system: true }
+      - user:  { name: nginx, system: true, group: nginx, shell: /sbin/nologin }
+      - archive: { blob: main, dest: "{{ .Paths.Generation }}", strip: 1 }
+      - file:
+          path:    "{{ .Paths.Webroot }}/index.html"
+          source:  index.html
+          owner:   nginx
+          mode:    "0644"
+      - template:
+          src:    nginx.conf.tmpl
+          dest:   "{{ .Paths.Config }}/nginx.conf"
+          owner:  nginx
+          mode:   "0640"
+          notify: reload            # ★ 所有参数都是 reloadRequired，永不重启
+
+    workload:
+      runtime: systemd
+      systemd:
+        exec:        "{{ .Paths.Current }}/sbin/nginx -c {{ .Paths.Config }}/nginx.conf -g 'daemon off;'"
+        execReload:  "{{ .Paths.Current }}/sbin/nginx -c {{ .Paths.Config }}/nginx.conf -s reload"
+        user:        root           # 需绑定 80 端口；worker 由配置降权为 nginx
+        restart:     always
+        restartSec:  3s
+        limitNofile: 65536
+        killMode:    mixed
+        timeoutStop: 30s
+
+    health:
+      http: { path: /healthz, port: "{{ .Params.http_port }}" }
+      startupGrace: 10s
+      interval: 10s

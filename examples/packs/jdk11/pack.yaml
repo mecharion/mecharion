@@ -1,0 +1,55 @@
+schema: pack/v1
+name: jdk11
+version: "11.0.24"
+revision: 1
+description: "Eclipse Temurin JDK 11 —— 仅提供运行时，不启动任何进程"
+homepage: "https://adoptium.net"
+license: GPL-2.0-with-classpath-exception
+keywords: [java, jdk, runtime]
+platforms: [linux/amd64, linux/arm64]
+
+# 大版本在 Pack 名中，因此约束只需管小版本。
+# 11.0.x 之间可以直接换 generation（JDK 小版本向后兼容）。
+upgradePolicy:
+  compatible: "~11"
+
+requires:
+  os:
+    family: [debian, rhel]
+    glibc: ">=2.17"
+
+blobs:
+  main:
+    linux/amd64:
+      sha256:    "1111aaaa00000000000000000000000000000000000000000000000000000000"
+      size:      196083712
+      filename:  "OpenJDK11U-jdk_x64_linux_hotspot_11.0.24_8.tar.gz"
+      sourceUrl: "https://github.com/adoptium/temurin11-binaries/releases/download/jdk-11.0.24%2B8/OpenJDK11U-jdk_x64_linux_hotspot_11.0.24_8.tar.gz"
+    linux/arm64:
+      sha256:    "2222bbbb00000000000000000000000000000000000000000000000000000000"
+      size:      191889408
+      filename:  "OpenJDK11U-jdk_aarch64_linux_hotspot_11.0.24_8.tar.gz"
+
+params:
+  register_alternatives:
+    type: bool
+    default: false
+    description: "是否把 java/javac 注册到 /usr/local/bin（多 JDK 共存时应保持 false）"
+
+roles:
+  # 唯一角色，无 workload —— 这个 Pack 只负责让文件出现在正确的位置
+  - name: runtime
+    description: "JDK 安装，不启动进程"
+    cardinality: "0-N"
+    resources:
+      - archive: { blob: main, dest: "{{ .Paths.Generation }}", strip: 1 }
+      - symlink:
+          path:   /usr/local/bin/java
+          target: "{{ .Paths.Current }}/bin/java"
+          force:  true
+          when:   "{{ .Params.register_alternatives }}"
+      - symlink:
+          path:   /usr/local/bin/javac
+          target: "{{ .Paths.Current }}/bin/javac"
+          force:  true
+          when:   "{{ .Params.register_alternatives }}"

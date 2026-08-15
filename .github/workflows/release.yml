@@ -1,0 +1,56 @@
+name: Release
+
+# 只在推 vX.Y.Z 标签时跑——不在每次 push/PR 上跑，发布是一个显式动作。
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write   # 创建 GitHub Release、上传制品
+  id-token: write    # cosign keyless 签名 + build provenance attestation 都要靠这个换 OIDC token
+
+env:
+  GO_VERSION: "1.26" # 与 ci.yml 保持同一个值——发布用的 Go 版本不该跟 CI 验证过的不一样
+
+# 故意不设 cancel-in-progress：一次真正在发布的 run 被取消，会留下
+# 一个不完整的 GitHub Release，比多等它跑完更糟。
+concurrency:
+  group: release-${{ github.ref }}
+
+jobs:
+  release:
+    name: 构建、签名、发布
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0 # goreleaser 要算 changelog（上一个 tag 到这次之间的提交），需要完整历史
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # 三个发布工具都是 go install（见 Makefile 的 release-tools 目标），
+      # 不用额外的第三方 Action——版本纪律只在 Makefile 一处，本地
+      # `make release-dry-run` 与这里装的是完全一样的二进制。
+      - run: make release-tools
+      - run: echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: goreleaser release
+        run: goreleaser release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # SLSA 风格的构建溯源证明：证明这些文件确实由本仓库的这个
+      # workflow run 构建，而不是有人在别处编译后冒充上传。只对真正
+      # 的发布制品（归档 + checksums）做证明，SBOM/签名文件本身不是
+      # "构建产物"，不需要再证明一层。
+      - name: attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/mecharion_*.tar.gz
+            dist/mecharion_*.zip
+            dist/checksums.txt

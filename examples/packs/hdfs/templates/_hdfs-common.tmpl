@@ -1,0 +1,26 @@
+{{- define "hdfs-common" -}}
+  <property>
+    <name>dfs.replication</name>
+    <value>{{ .Params.replication }}</value>
+  </property>
+  <property>
+    <name>dfs.blocksize</name>
+    <value>{{ .Params.block_size.Bytes }}</value>
+  </property>
+  <property>
+    <name>dfs.namenode.name.dir</name>
+    <value>{{ range $i, $d := .Paths.NnDirs }}{{ if $i }},{{ end }}file://{{ $d }}{{ end }}</value>
+  </property>
+  <property>
+    <name>dfs.datanode.data.dir</name>
+    <value>{{ range $i, $d := .Paths.DnDirs }}{{ if $i }},{{ end }}file://{{ $d }}{{ end }}</value>
+  </property>
+  <property>
+    <name>dfs.datanode.du.reserved</name>
+    <value>{{ .Params.dn_reserved.Bytes }}</value>
+  </property>
+  <property>
+    <name>dfs.datanode.address</name>
+    <value>0.0.0.0:{{ .Params.dn_data_port }}</value>
+  </property>
+{{- end -}}

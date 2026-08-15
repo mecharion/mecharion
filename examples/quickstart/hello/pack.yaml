@@ -1,0 +1,68 @@
+schema: pack/v1
+name: hello
+version: "0.1.0"
+revision: 1
+description: "README quickstart 用的最小示例——真实可部署，不是规范验证物"
+license: Apache-2.0
+keywords: [quickstart]
+platforms: [linux/amd64]
+
+# 这是给新用户跟着 README 抄命令用的示例，不是 examples/packs/ 那种
+# 压测 pack/v1 格式边角的规范验证物——两者故意分开存放、分开命名
+# （20260809 全面审阅 REV-022）。
+#
+# 载荷由 `hack/quickstartpack.sh` 现场编译（复用 test/webapp 这个最小
+# HTTP 服务，不额外引入依赖），`mechpack assemble` 随后算出真实 sha256。
+# 与 examples/packs/ 的占位 sha256 不同，这个包能被真的部署、真的跑起来。
+
+sources:
+  main:
+    linux/amd64: dist/hello-linux-amd64.tar.gz
+
+params:
+  port:
+    type: port
+    default: 8080
+    description: "HTTP 监听端口"
+    restartRequired: true
+
+  log_level:
+    type: enum
+    values: [debug, info, warn, error]
+    default: info
+    description: "日志级别"
+    reloadRequired: true
+
+paths:
+  conf:
+    default: "{{ .Node.Roots.etc }}/apps/{{ .Component }}"
+    mode: "0750"
+
+roles:
+  - name: server
+    cardinality: "1-N"
+    resources:
+      - user: { name: hello, system: true }
+      - archive: { blob: main, dest: "{{ .Paths.Generation }}", strip: 1 }
+      - directory: { path: "{{ .Paths.conf }}", owner: hello, mode: "0750" }
+      - file:
+          path: "{{ .Paths.conf }}/app.yaml"
+          owner: hello
+          mode: "0640"
+          content: |
+            port: {{ .Params.port }}
+            log_level: {{ .Params.log_level }}
+    workload:
+      runtime: systemd
+      systemd:
+        exec: "{{ .Paths.Current }}/bin/webapp --config {{ .Paths.conf }}/app.yaml"
+        # log_level 声明了 reloadRequired，因此必须有 reload 命令
+        # （lint 的 R25）；用 shell 内建的 kill，/bin/kill 由 procps 提供，
+        # 贫瘠镜像里没有。
+        execReload: "/bin/sh -c 'kill -HUP $MAINPID'"
+        user: hello
+        restart: always
+        restartSec: 5s
+    health:
+      http: { path: /healthz, port: "{{ .Params.port }}" }
+      startupGrace: 10s

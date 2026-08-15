@@ -1,0 +1,18 @@
+# 由 Mecharion 渲染，请勿手工编辑
+# 客户端连接服务定义 —— 由 client 角色分发到应用节点
+
+[{{ .Component }}]
+host={{ (index (.Topology.Role "primary") 0).Address }}
+port={{ .Params.port }}
+dbname=postgres
+
+{{- if eq .Profile "replicated" }}
+{{- range $i, $r := .Topology.Role "replica" }}
+
+[{{ $.Component }}-ro-{{ $i }}]
+host={{ $r.Address }}
+port={{ $.Params.port }}
+dbname=postgres
+target_session_attrs=read-only
+{{- end }}
+{{- end }}

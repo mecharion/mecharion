@@ -1,0 +1,294 @@
+schema: pack/v1
+name: kafka
+version: "3.8.0"
+revision: 1
+description: "Apache Kafka —— 支持 KRaft（合并/分离）与 ZooKeeper 三种形态"
+homepage: "https://kafka.apache.org"
+license: Apache-2.0
+keywords: [messaging, streaming, kafka]
+platforms: [linux/amd64, linux/arm64]
+
+# Kafka 跨大版本升级需要按顺序调整 inter.broker.protocol.version，
+# 不能直接换 generation。限制为同大版本线内升级。
+upgradePolicy:
+  compatible: "~3"
+
+requires:
+  os:
+    family: [debian, rhel]
+  packs:
+    - { name: jdk17, version: ">=17.0.9", scope: node }
+  resources:
+    memory: 4GB
+
+blobs:
+  main:
+    linux/amd64:
+      sha256:    "6666666666666666666666666666666666666666666666666666666666666666"
+      size:      114294784
+      filename:  "kafka_2.13-3.8.0.tgz"
+      sourceUrl: "https://archive.apache.org/dist/kafka/3.8.0/kafka_2.13-3.8.0.tgz"
+    linux/arm64:
+      sha256:    "7777777777777777777777777777777777777777777777777777777777777777"
+      size:      114294784
+      filename:  "kafka_2.13-3.8.0.tgz"
+
+params:
+  client_port:
+    type: port
+    default: 9092
+    group: "网络"
+    restartRequired: true
+
+  controller_port:
+    type: port
+    default: 9093
+    group: "网络"
+    restartRequired: true
+
+  heap:
+    type: size
+    # 官方建议 broker 堆 6GB 上下；小内存机器需下调。
+    # 事实在放置时快照并固化——加内存不会导致服务被自动重启。
+    defaultFrom: '{{ min (div .Node.Facts.Memory.Total 4) "6GB" }}'
+    default: 1GB
+    description: "JVM 堆，默认为物理内存的 1/4 且不超过 6GB"
+    group: "性能"
+    restartRequired: true
+
+  num_partitions:
+    type: int
+    default: 3
+    min: 1
+    group: "主题默认值"
+    restartRequired: true
+
+  default_replication_factor:
+    type: int
+    default: 3
+    min: 1
+    group: "主题默认值"
+    restartRequired: true
+
+  log_retention:
+    type: duration
+    default: 168h
+    description: "日志保留时长"
+    group: "存储"
+    restartRequired: true
+
+  cluster_id:
+    type: string
+    default: "MkU3OEVBNTcwNTJENDM2Qk"
+    description: "KRaft 集群标识，格式化后不可更改"
+    immutable: true
+    advanced: true
+
+paths:
+  # Kafka 要求配置位于 $KAFKA_HOME/config
+  config:
+    default:  "{{ .Node.Roots.etc }}/apps/{{ .Component }}"
+    linkInto: "{{ .Paths.Generation }}/config"
+    distDir:  "config"
+    owner:    kafka
+    mode:     "0750"
+
+  # 日志段目录，典型多盘
+  logDirs:
+    kind: multi
+    default: ["{{ .Node.Roots.data }}/apps/{{ .Component }}/logs"]
+    subpath: "kafka/logs"
+    owner:   kafka
+    mode:    "0700"
+
+  # KRaft 元数据目录（controller 角色使用）
+  metadataDir:
+    default: "{{ .Node.Roots.data }}/apps/{{ .Component }}/meta"
+    owner:   kafka
+    mode:    "0700"
+
+shared:
+  resources:
+    - group: { name: kafka, system: true }
+    - user:  { name: kafka, system: true, group: kafka, home: "{{ .Paths.Home }}", shell: /bin/bash }
+    - archive: { blob: main, dest: "{{ .Paths.Generation }}", strip: 1 }
+
+roles:
+  # KRaft 合并模式：一个进程同时是 broker 与 controller
+  - name: combined
+    description: "KRaft 合并节点（process.roles=broker,controller）"
+    cardinality: "0"
+    quorum: true                     # 合并模式下它同时承担元数据仲裁
+    resources:
+      - template:
+          src:    server-kraft.properties.tmpl
+          dest:   "{{ .Paths.Config }}/server.properties"
+          owner:  kafka
+          mode:   "0640"
+          notify: restart
+    workload:
+      runtime: systemd
+      systemd:
+        exec:  "{{ .Paths.Current }}/bin/kafka-server-start.sh {{ .Paths.Config }}/server.properties"
+        user:  kafka
+        group: kafka
+        env:
+          KAFKA_HEAP_OPTS: "-Xms{{ .Params.heap }} -Xmx{{ .Params.heap }}"
+          LOG_DIR:         "{{ .Paths.Logs }}"
+        restart: always
+        limitNofile: 100000
+        timeoutStop: 180s
+    health:
+      tcp: { port: "{{ .Params.client_port }}" }
+      startupGrace: 90s
+    hooks:
+      preStart:
+        - script: kraft-format.sh
+          user:   kafka
+          timeout: 120s
+
+  # KRaft 分离模式：专用 controller
+  - name: controller
+    description: "KRaft 专用 controller（process.roles=controller）"
+    cardinality: "0"
+    quorum: true                     # KRaft 元数据仲裁：建议奇数，且 Rollout 限并发
+    resources:
+      - template:
+          src:    server-kraft.properties.tmpl
+          dest:   "{{ .Paths.Config }}/server.properties"
+          owner:  kafka
+          mode:   "0640"
+          notify: restart
+    workload:
+      runtime: systemd
+      systemd:
+        exec:  "{{ .Paths.Current }}/bin/kafka-server-start.sh {{ .Paths.Config }}/server.properties"
+        user:  kafka
+        group: kafka
+        env:
+          KAFKA_HEAP_OPTS: "-Xms1G -Xmx1G"
+          LOG_DIR:         "{{ .Paths.Logs }}"
+        restart: always
+        timeoutStop: 120s
+    health:
+      tcp: { port: "{{ .Params.controller_port }}" }
+      startupGrace: 60s
+    hooks:
+      preStart:
+        - script: kraft-format.sh
+          user:   kafka
+          timeout: 120s
+
+  # broker：KRaft 分离模式或 ZooKeeper 模式下的数据节点
+  - name: broker
+    description: "数据节点"
+    cardinality: "0"
+    resources:
+      - template:
+          src:    server-kraft.properties.tmpl
+          dest:   "{{ .Paths.Config }}/server.properties"
+          owner:  kafka
+          mode:   "0640"
+          notify: restart
+          when:   '{{ ne .Profile "zookeeper" }}'
+      - template:
+          src:    server-zk.properties.tmpl
+          dest:   "{{ .Paths.Config }}/server.properties"
+          owner:  kafka
+          mode:   "0640"
+          notify: restart
+          when:   '{{ eq .Profile "zookeeper" }}'
+    workload:
+      runtime: systemd
+      systemd:
+        exec:  "{{ .Paths.Current }}/bin/kafka-server-start.sh {{ .Paths.Config }}/server.properties"
+        user:  kafka
+        group: kafka
+        env:
+          KAFKA_HEAP_OPTS: "-Xms{{ .Params.heap }} -Xmx{{ .Params.heap }}"
+          LOG_DIR:         "{{ .Paths.Logs }}"
+        restart: always
+        limitNofile: 100000
+        timeoutStop: 180s
+    health:
+      tcp: { port: "{{ .Params.client_port }}" }
+      startupGrace: 90s
+    hooks:
+      preStart:
+        - script: kraft-format.sh
+          user:   kafka
+          when:   '{{ ne .Profile "zookeeper" }}'
+          timeout: 120s
+
+  - name: client
+    description: "客户端工具与配置分发"
+    cardinality: "0-N"
+    resources:
+      - template:
+          src:  client.properties.tmpl
+          dest: "{{ .Paths.Config }}/client.properties"
+          mode: "0644"
+
+profiles:
+  # 形态轴是「架构」而非「规模」——三者节点数可以完全相同
+  - name: kraft-combined
+    default: true
+    description: "KRaft 合并模式：每个节点同时承担 broker 与 controller。中小规模首选"
+    minNodes: 3
+    roles:
+      combined:   { cardinality: "1-N" }
+      broker:     { enabled: false }
+      controller: { enabled: false }
+    placement:
+      - antiAffinity: [combined]
+        scope: node
+        enforcement: required
+        reason: "同节点多实例会争抢端口与磁盘，且失去容错意义"
+
+  - name: kraft-separated
+    description: "KRaft 分离模式：专用 controller 与 broker。大规模集群元数据不受数据流量影响"
+    minNodes: 5
+    upgradeFrom: [kraft-combined]
+    roles:
+      controller: { cardinality: "3" }
+      broker:     { cardinality: "1-N" }
+      combined:   { enabled: false }
+    placement:
+      - antiAffinity: [controller]
+        scope: node
+        enforcement: required
+        reason: "controller 仲裁要求多数派存活"
+      - antiAffinity: [broker]
+        scope: node
+        enforcement: required
+        reason: "同节点多 broker 会争抢磁盘与端口，且失去容错意义"
+      - antiAffinity: [controller, broker]
+        scope: node
+        enforcement: preferred
+        reason: "分离模式的意义就是让元数据不受数据流量影响；同置会抵消该收益"
+      - antiAffinity: [controller]
+        scope: rack
+        enforcement: preferred
+
+  - name: zookeeper
+    description: "ZooKeeper 模式（3.x 遗留形态，仅供从旧集群迁移）"
+    minNodes: 3
+    roles:
+      broker:     { cardinality: "1-N" }
+      combined:   { enabled: false }
+      controller: { enabled: false }
+    requires:
+      packs:
+        - { name: zookeeper, version: ">=3.6", scope: site }
+    params:
+      zk_connect:
+        type: string
+        # 引用提供方声明的导出名，而非伸手进它的角色内部
+        from: "requires.zookeeper.exports.client"
+        description: "ZooKeeper 连接串"
+        restartRequired: true
+    placement:
+      - antiAffinity: [broker]
+        scope: node
+        enforcement: required
+        reason: "同节点多 broker 会争抢磁盘与端口，且失去容错意义"

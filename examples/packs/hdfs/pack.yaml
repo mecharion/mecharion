@@ -1,0 +1,383 @@
+schema: pack/v1
+name: hdfs
+version: "3.4.0"
+revision: 1
+description: "Apache Hadoop HDFS —— 支持单机 / 分布式 / 高可用三种形态"
+homepage: "https://hadoop.apache.org"
+license: Apache-2.0
+keywords: [bigdata, hadoop, hdfs, storage]
+platforms: [linux/amd64, linux/arm64]
+
+requires:
+  os:
+    family: [debian, rhel]
+    glibc: ">=2.17"
+  packs:
+    # 大版本进 Pack 名：Hadoop 3.4 正式支持 JDK 8/11，此处锁定 11 这条线。
+    # scope: node —— JDK 是本机磁盘上的文件，必须与本 Pack 的每个角色同节点。
+    - { name: jdk11, version: ">=11.0.20", scope: node }
+  resources:
+    memory: 4GB
+
+blobs:
+  main:
+    linux/amd64:
+      sha256:    "4444444444444444444444444444444444444444444444444444444444444444"
+      size:      985661440
+      filename:  "hadoop-3.4.0-linux-amd64.tar.gz"
+      sourceUrl: "https://archive.apache.org/dist/hadoop/common/hadoop-3.4.0/hadoop-3.4.0.tar.gz"
+    linux/arm64:
+      sha256:    "5555555555555555555555555555555555555555555555555555555555555555"
+      size:      978321408
+      filename:  "hadoop-3.4.0-linux-arm64.tar.gz"
+
+# ── 参数 ──────────────────────────────────────────────────────────────
+params:
+  replication:
+    type: int
+    default: 3
+    min: 1
+    max: 10
+    description: "默认副本数"
+    group: "存储"
+    restartRequired: true    # HDFS 不支持配置热加载，NameNode 需重启
+
+  block_size:
+    type: size
+    default: 128MB
+    description: "HDFS 块大小"
+    group: "存储"
+    advanced: true
+
+  nn_rpc_port:
+    type: port
+    default: 8020
+    group: "网络"
+    restartRequired: true
+
+  nn_http_port:
+    type: port
+    default: 9870
+    group: "网络"
+    restartRequired: true
+
+  dn_data_port:
+    type: port
+    default: 9866
+    group: "网络"
+    restartRequired: true
+
+  nn_heap:
+    type: size
+    default: 2GB
+    description: "NameNode JVM 堆大小"
+    group: "性能"
+    advanced: true
+    restartRequired: true
+
+  dn_heap:
+    type: size
+    default: 1GB
+    description: "DataNode JVM 堆大小"
+    group: "性能"
+    advanced: true
+    restartRequired: true
+
+  dn_reserved:
+    type: size
+    default: 10GB
+    description: "每块数据盘为非 HDFS 用途保留的空间"
+    group: "存储"
+    advanced: true
+    restartRequired: true
+
+# ── 路径 ──────────────────────────────────────────────────────────────
+# Hadoop 要求配置位于 $HADOOP_HOME/etc/hadoop，这是「配置在 home 内」布局，
+# 用 linkInto 调和到「generation 只读」不变式。
+paths:
+  config:
+    default:  "{{ .Node.Roots.etc }}/apps/{{ .Component }}"
+    linkInto: "{{ .Paths.Generation }}/etc/hadoop"
+    distDir:  "etc/hadoop"
+    owner:    hdfs
+    mode:     "0750"
+
+  # NameNode 元数据目录（单盘即可，需高可靠）
+  nnDirs:
+    kind: multi
+    default: ["{{ .Node.Roots.data }}/apps/{{ .Component }}/nn"]
+    subpath: "hdfs/nn"
+    owner:   hdfs
+    mode:    "0700"
+
+  # DataNode 数据盘（典型场景为多盘，由 ConfigGroup 按机型绑定）
+  dnDirs:
+    kind: multi
+    default: ["{{ .Node.Roots.data }}/apps/{{ .Component }}/dn"]
+    subpath: "hdfs/dn"
+    owner:   hdfs
+    mode:    "0700"
+
+  # JournalNode 共享编辑日志（仅 HA 形态使用）
+  jnDir:
+    default: "{{ .Node.Roots.data }}/apps/{{ .Component }}/jn"
+    owner:   hdfs
+    mode:    "0700"
+
+# ── 全角色共有 ────────────────────────────────────────────────────────
+shared:
+  resources:
+    - group: { name: hadoop, system: true }
+    - user:
+        name:   hdfs
+        system: true
+        group:  hadoop
+        home:   "{{ .Paths.Home }}"
+        shell:  /bin/bash
+
+    - archive: { blob: main, dest: "{{ .Paths.Generation }}", strip: 1 }
+    - directory: { path: "{{ .Paths.Logs }}", owner: hdfs, group: hadoop, mode: "0750" }
+
+    # 三份配置文件对所有角色一致——Hadoop 的惯例是全集群同一份配置
+    - template:
+        src:    hadoop-env.sh.tmpl
+        dest:   "{{ .Paths.Config }}/hadoop-env.sh"
+        owner:  hdfs
+        mode:   "0640"
+    - template:
+        src:    core-site.xml.tmpl
+        dest:   "{{ .Paths.Config }}/core-site.xml"
+        owner:  hdfs
+        mode:   "0640"
+        notify: restart
+    - template:
+        src:    hdfs-site.xml.tmpl
+        dest:   "{{ .Paths.Config }}/hdfs-site.xml"
+        owner:  hdfs
+        mode:   "0640"
+        notify: restart
+
+# ── 角色 ──────────────────────────────────────────────────────────────
+roles:
+  - name: journalnode
+    description: "共享编辑日志仲裁节点（仅 HA 形态）"
+    cardinality: "0"                 # 默认不启用，由 ha profile 打开
+    quorum: true                     # 多数派仲裁：建议奇数，且 Rollout 限并发
+
+    # jnDir 已在 paths 中声明 owner/mode，引擎自动创建，无需 directory 资源
+    workload:
+      runtime: systemd
+      systemd:
+        exec:  "{{ .Paths.Current }}/bin/hdfs journalnode"
+        user:  hdfs
+        group: hadoop
+        env:
+          HADOOP_CONF_DIR: "{{ .Paths.Config }}"
+          HADOOP_LOG_DIR:  "{{ .Paths.Logs }}"
+        restart: always
+        timeoutStop: 60s
+    health:
+      tcp: { port: 8485 }
+      startupGrace: 30s
+
+  - name: namenode
+    description: "元数据服务"
+    cardinality: "1"
+    requires: [journalnode]          # 无实例时该依赖自动忽略
+    workload:
+      runtime: systemd
+      systemd:
+        exec:  "{{ .Paths.Current }}/bin/hdfs namenode"
+        user:  hdfs
+        group: hadoop
+        env:
+          HADOOP_CONF_DIR:  "{{ .Paths.Config }}"
+          HADOOP_LOG_DIR:   "{{ .Paths.Logs }}"
+          HDFS_NAMENODE_OPTS: "-Xms{{ .Params.nn_heap }} -Xmx{{ .Params.nn_heap }}"
+        restart: always
+        limitNofile: 65536
+        timeoutStop: 120s
+    health:
+      http: { path: /isActive, port: "{{ .Params.nn_http_port }}", expectStatus: [200, 405] }
+      startupGrace: 120s
+    hooks:
+      preStart:
+        # ① 格式化：整个 Component 只做一次，在 ordinal 最小的 NameNode 上
+        - script: nn-format.sh
+          scope:  once
+          user:   hdfs
+          timeout: 300s
+        # ② HA：初始化共享编辑日志，同样只做一次
+        - script: nn-init-shared-edits.sh
+          scope:  once
+          user:   hdfs
+          when:   '{{ eq .Profile "ha" }}'
+          timeout: 300s
+        # ③ HA：备 NameNode 从主拉取元数据——每个非首实例都要做
+        - script: nn-bootstrap-standby.sh
+          user:   hdfs
+          when:   '{{ and (eq .Profile "ha") (ne .Topology.Ordinal 0) }}'
+          timeout: 600s
+
+  - name: secondarynamenode
+    description: "检查点节点（仅 distributed 形态；HA 下由备 NN 承担其职责）"
+    cardinality: "0"
+    requires: [namenode]
+    workload:
+      runtime: systemd
+      systemd:
+        exec:  "{{ .Paths.Current }}/bin/hdfs secondarynamenode"
+        user:  hdfs
+        group: hadoop
+        env:
+          HADOOP_CONF_DIR: "{{ .Paths.Config }}"
+          HADOOP_LOG_DIR:  "{{ .Paths.Logs }}"
+        restart: always
+    health:
+      tcp: { port: 9868 }
+      startupGrace: 60s
+
+  - name: zkfc
+    description: "ZooKeeper 故障转移控制器（仅 HA 形态）"
+    cardinality: "0"
+    requires: [namenode]
+    workload:
+      runtime: systemd
+      systemd:
+        exec:  "{{ .Paths.Current }}/bin/hdfs zkfc"
+        user:  hdfs
+        group: hadoop
+        env:
+          HADOOP_CONF_DIR: "{{ .Paths.Config }}"
+          HADOOP_LOG_DIR:  "{{ .Paths.Logs }}"
+        restart: always
+    health:
+      tcp: { port: 8019 }
+      startupGrace: 60s
+    hooks:
+      preStart:
+        - script: zkfc-format.sh
+          scope:  once
+          user:   hdfs
+          timeout: 120s
+
+  - name: datanode
+    description: "数据节点"
+    cardinality: "1-N"
+    requires: [namenode]
+    # dnDirs 是 kind: multi，引擎按声明的 owner/mode 逐盘创建目录
+    workload:
+      runtime: systemd
+      systemd:
+        exec:  "{{ .Paths.Current }}/bin/hdfs datanode"
+        user:  hdfs
+        group: hadoop
+        env:
+          HADOOP_CONF_DIR:  "{{ .Paths.Config }}"
+          HADOOP_LOG_DIR:   "{{ .Paths.Logs }}"
+          HDFS_DATANODE_OPTS: "-Xms{{ .Params.dn_heap }} -Xmx{{ .Params.dn_heap }}"
+        restart: always
+        limitNofile: 65536
+        timeoutStop: 60s
+    health:
+      tcp: { port: "{{ .Params.dn_data_port }}" }
+      startupGrace: 60s
+
+  - name: client
+    description: "客户端配置分发，不启动任何进程"
+    cardinality: "0-N"
+    resources:
+      - symlink: { path: /usr/local/bin/hdfs, target: "{{ .Paths.Current }}/bin/hdfs", force: true }
+
+# ── 部署形态 ──────────────────────────────────────────────────────────
+profiles:
+  - name: standalone
+    default: true
+    description: "单机，无冗余，仅供开发测试"
+    minNodes: 1
+    roles:
+      namenode: { cardinality: "1" }
+      datanode: { cardinality: "1" }
+      secondarynamenode: { enabled: false }
+      journalnode:       { enabled: false }
+      zkfc:              { enabled: false }
+    params:
+      replication: { default: 1 }
+      nn_heap:     { default: 1GB }
+      dn_heap:     { default: 512MB }
+
+  - name: distributed
+    description: "分布式，无 HA，NameNode 为单点"
+    minNodes: 2
+    upgradeFrom: [standalone]
+    roles:
+      namenode:          { cardinality: "1" }
+      secondarynamenode: { cardinality: "1" }
+      datanode:          { cardinality: "1-N" }
+      journalnode:       { enabled: false }
+      zkfc:              { enabled: false }
+    placement:
+      - antiAffinity: [namenode, secondarynamenode]
+        scope: node
+        enforcement: required
+        reason: "SNN 与 NN 同节点时，NN 所在机器故障将同时丢失检查点，SNN 无法承担元数据恢复职责"
+      - antiAffinity: [datanode]
+        scope: node
+        enforcement: required
+        reason: "同节点多个 DataNode 会争抢同一批磁盘且端口冲突"
+
+  - name: ha
+    description: "高可用，双 NameNode + JournalNode 仲裁 + 自动故障转移"
+    minNodes: 4
+    upgradeFrom: [distributed]
+    roles:
+      namenode:          { cardinality: "2" }
+      journalnode:       { cardinality: "3" }
+      zkfc:              { cardinality: "2" }
+      datanode:          { cardinality: "3-N" }
+      secondarynamenode: { enabled: false }
+    requires:
+      packs:
+        # scope: site —— ZooKeeper 只需网络可达，不要求同节点，因此不暴露 Paths
+        - { name: zookeeper, version: ">=3.6", scope: site }
+    params:
+      nameservice_id:
+        type: string
+        default: "mycluster"
+        description: "HA 名称服务标识，创建后不可更改"
+        pattern: "^[a-z][a-z0-9-]*$"
+        immutable: true
+      zk_quorum:
+        type: string
+        # 引用提供方声明的导出名——用户不必手敲 quorum 串（最易出错的一步），
+        # 且不依赖 zookeeper Pack 的角色名与端口拼装方式
+        from: "requires.zookeeper.exports.client"
+        description: "ZooKeeper 连接串"
+        restartRequired: true
+      fencing_method:
+        type: enum
+        values: [sshfence, shell]
+        default: sshfence
+        advanced: true
+        restartRequired: true
+    placement:
+      - antiAffinity: [namenode]
+        scope: node
+        enforcement: required
+        reason: "两个 NameNode 同节点时 HA 完全失效"
+      - antiAffinity: [journalnode]
+        scope: node
+        enforcement: required
+        reason: "JournalNode 仲裁要求多数派存活，同节点会导致单机故障即失去多数派"
+      - affinity: [namenode, zkfc]
+        scope: node
+        enforcement: required
+        reason: "ZKFC 通过本地回环监控并 fence 其所在节点的 NameNode，必须同置"
+      - antiAffinity: [datanode]
+        scope: node
+        enforcement: required
+        reason: "同节点多个 DataNode 会争抢同一批磁盘且端口冲突"
+      - antiAffinity: [journalnode]
+        scope: rack
+        enforcement: preferred
+        reason: "跨机架分散可在整机架故障时保住多数派"

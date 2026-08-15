@@ -1,0 +1,130 @@
+schema: pack/v1
+name: java-webapp
+version: "2.4.0"
+revision: 1
+description: "示例 Java Web 应用——同时依赖 scope:node 的 JDK 与 scope:site 的数据库"
+license: Apache-2.0
+keywords: [example, webapp, java]
+platforms: [linux/amd64, linux/arm64]
+
+upgradePolicy:
+  compatible: "*"
+
+# 两种 scope 一次用全，语义与校验强度都不同（§5.1）
+requires:
+  packs:
+    # 本机磁盘上的文件 —— 每个实例所在节点都必须有 JDK
+    - { name: jdk11, version: ">=11.0.20", scope: node }
+    # 网络可达的服务 —— 同 Site 内有就行
+    - { name: postgresql, version: ">=14", scope: site }
+  os:
+    family: [debian, rhel]
+
+blobs:
+  main:
+    linux/amd64:
+      sha256:   "4444444444444444444444444444444444444444444444444444444444444444"
+      size:     18874368
+      filename: "java-webapp-2.4.0.tar.gz"
+    linux/arm64:
+      sha256:   "5555555555555555555555555555555555555555555555555555555555555555"
+      size:     18874368
+      filename: "java-webapp-2.4.0.tar.gz"
+
+params:
+  port:
+    type: port
+    default: 8080
+    description: "HTTP 监听端口"
+    restartRequired: true
+
+  # 按节点内存算出一个合理的堆，运维可按经验改（§7.4）
+  heap:
+    type: size
+    defaultFrom: '{{ min (div .Node.Facts.Memory.Total 2) "8GB" }}'
+    default: 1GB
+    description: "JVM 堆上限"
+    group: "JVM"
+    restartRequired: true
+
+  # ── 数据库连接 ────────────────────────────────────────────────────
+  # 由提供方导出的**具名字段**自行组装成 JDBC URL。PostgreSQL 不需要
+  # 知道我们要的是 JDBC 形状——那正是 fields 相对 format 的意义（§5.4）。
+  #
+  # 注意它是 string 不是 secret：URL 里只有主机、端口、库名，**不含口令**。
+  # 「保险起见都标 secret」会让这个标记退化成噪音——排障时连「到底连的
+  # 哪个库」都看不到，而真正该被保护的反倒淹没了。污点要精确跟随数据流。
+  jdbc_url:
+    type: string
+    description: "数据库连接串，由 postgresql 的导出字段组装"
+    group: "数据库"
+    restartRequired: true
+    from: >-
+      jdbc:postgresql://{{ .Requires.postgresql.Exports.app.host }}:{{ .Requires.postgresql.Exports.app.port }}/{{ .Requires.postgresql.Exports.app.database }}
+
+  db_user:
+    type: string
+    description: "数据库账号"
+    group: "数据库"
+    restartRequired: true
+    from: "{{ .Requires.postgresql.Exports.app.username }}"
+
+  # 只有这一个真的携带口令
+  db_password:
+    type: secret
+    description: "数据库口令，由 postgresql 生成，本 Pack 不持有也不展示"
+    group: "数据库"
+    restartRequired: true
+    from: "{{ .Requires.postgresql.Exports.app.password }}"
+
+paths:
+  config:
+    default:  "{{ .Node.Roots.etc }}/apps/{{ .Component }}"
+    mode:     "0750"
+    owner:    javaapp
+
+roles:
+  - name: default
+    cardinality: "1-N"
+
+    resources:
+      - user: { name: javaapp, system: true }
+      - archive: { blob: main, dest: "{{ .Paths.Generation }}", strip: 1 }
+
+      # 口令**单独落在 EnvironmentFile 里**，不进主配置。
+      # 主配置常被复制进工单、支持包、甚至有人提交进 git；把口令从它里面
+      # 拿走，等于把最常见的泄漏途径直接堵掉。0640 让同组的运维工具能读，
+      # 比 0600 更实用（规则 46 只要求 others 位为 0）。
+      - template:
+          src:   env.tmpl
+          dest:  "{{ .Paths.Config }}/env"
+          owner: javaapp
+          mode:  "0640"
+
+      # 主配置不含任何口令，因此可以是 0644
+      - template:
+          src:   application.properties.tmpl
+          dest:  "{{ .Paths.Config }}/application.properties"
+          owner: javaapp
+          mode:  "0644"
+
+    workload:
+      runtime: systemd
+      systemd:
+        # .Requires.jdk11.Paths 只在 scope: node 时可用（§5.1）
+        exec: >-
+          {{ .Requires.jdk11.Paths.Current }}/bin/java
+          -Xmx{{ .Params.heap }}
+          -jar {{ .Paths.Current }}/lib/app.jar
+          --spring.config.location={{ .Paths.Config }}/application.properties
+        envFile:     "{{ .Paths.Config }}/env"
+        user:        javaapp
+        group:       javaapp
+        restart:     on-failure
+        restartSec:  5s
+        limitNofile: 65536
+        timeoutStop: 60s
+
+    health:
+      http: { path: /actuator/health, port: "{{ .Params.port }}" }
+      startupGrace: 90s

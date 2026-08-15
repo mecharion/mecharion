@@ -1,0 +1,14 @@
+# 由 Mecharion 渲染，请勿手工编辑
+# TYPE   DATABASE      USER         ADDRESS                METHOD
+
+local    all           postgres                            peer
+host     all           all          127.0.0.1/32           scram-sha-256
+host     all           all          {{ .Params.allowed_cidr }}   scram-sha-256
+
+{{- if eq .Profile "replicated" }}
+
+# ── 流复制连接：仅允许本 Component 的副本节点 ──
+{{- range .Topology.Role "replica" }}
+host     replication   replicator   {{ .Address }}/32        scram-sha-256
+{{- end }}
+{{- end }}

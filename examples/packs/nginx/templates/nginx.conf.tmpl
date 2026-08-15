@@ -1,0 +1,41 @@
+# 由 Mecharion 渲染，请勿手工编辑
+# Component: {{ .Component }}  Generation: {{ .Generation.Seq }}
+
+user  nginx nginx;
+worker_processes  {{ .Params.worker_processes }};
+error_log  {{ .Paths.Logs }}/error.log warn;
+pid        {{ .Paths.Runtime }}/nginx.pid;
+
+events {
+    worker_connections  {{ .Params.worker_connections }};
+}
+
+http {
+    include       {{ .Paths.Current }}/conf/mime.types;
+    default_type  application/octet-stream;
+
+    access_log  {{ .Paths.Logs }}/access.log;
+
+    client_body_temp_path  {{ .Paths.Runtime }}/client_body;
+    proxy_temp_path        {{ .Paths.Runtime }}/proxy;
+    fastcgi_temp_path      {{ .Paths.Runtime }}/fastcgi;
+
+    sendfile              on;
+    keepalive_timeout     {{ .Params.keepalive_timeout.Seconds }};
+    client_max_body_size  {{ .Params.client_max_body_size }};
+
+    server {
+        listen       {{ .Params.http_port }};
+        server_name  {{ .Params.server_name }};
+        root         {{ .Paths.Webroot }};
+
+        location = /healthz {
+            access_log off;
+            return 200 "ok\n";
+        }
+
+        location / {
+            index  index.html;
+        }
+    }
+}

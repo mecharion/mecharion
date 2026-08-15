@@ -1,0 +1,8 @@
+# 由 Mecharion 渲染，请勿手工编辑
+#
+# heap 由 defaultFrom 按节点内存算出并在放置时固化：
+#   min(memory.total / 2, 31GB)
+# 加内存不会自动改变此值——需 mechctl node facts refresh --apply 显式应用。
+
+-Xms{{ .Params.heap }}
+-Xmx{{ .Params.heap }}

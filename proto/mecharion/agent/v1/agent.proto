@@ -1,0 +1,387 @@
+// Package mecharion.agent.v1 是 mechd 与 mechlet 之间的协议。
+//
+// 设计见 docs/design/17-protocol.md 与 ADR-0029。
+//
+// **包名带大版本**：不兼容变更换包名（v2），两版可并存，因而控制面与 agent
+// 可以分别升级——多节点场景下「先升哪个」必须是运维自己能决定的事。
+syntax = "proto3";
+
+package mecharion.agent.v1;
+
+option go_package = "github.com/mecharion/mecharion/internal/protocol/agentpb;agentpb";
+
+// Agent 是 mechlet 拨向 mechd 的服务。
+//
+// **mechlet 主动拨出**，节点上零入站端口。反过来（mechd 连 mechlet）要求
+// 每台机器开一个入站端口，与那条约束直接冲突。
+service Agent {
+  // Register 交换版本与节点能力，换取会话。
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+
+  // Subscribe 是服务端流：mechlet 拨出后挂住，mechd 按需推送规格。
+  //
+  // 不用双向流：上报与下发的失败模式不同，一条流上一次上报失败会连带
+  // 撕掉下发通道。分开之后，心跳丢几个包不影响正在进行的部署。
+  rpc Subscribe(SubscribeRequest) returns (stream Assignment);
+
+  // Report 上报观测状态（高频小包）。
+  rpc Report(ReportRequest) returns (ReportResponse);
+
+  // PushEvents 补报断连期间缓冲的事件。
+  rpc PushEvents(PushEventsRequest) returns (PushEventsResponse);
+
+  // FetchBlob 按 sha256 取载荷，分块流式返回。
+  rpc FetchBlob(FetchBlobRequest) returns (stream BlobChunk);
+
+  // RenewCert 用**当前仍然有效的证书**换一张新的。
+  //
+  // 不需要 join token——现有证书就是身份证明。方向与 join 相反：
+  // join 是「还没有身份的机器要一个」，续期是「已有身份的机器换一张」。
+  //
+  // 它挂在 Agent service 上而不是那个不带证书的 join 入口，正是因为
+  // 它**必须**带证书：一台连不出有效证书的机器要走重新加入。
+  rpc RenewCert(RenewCertRequest) returns (RenewCertResponse);
+
+  // Tasks 是 **ad-hoc 命令**通道：restart / exec / logs 走它。
+  //
+  // **与 Subscribe 分开是刻意的**（ADR-0038）。两者的分界是「丢一次会
+  // 怎样」：
+  //
+  //   期望状态  丢了无所谓，下一轮重新确认；断连三天回来照做仍然正确
+  //   命令      丢了就是没执行，必须告诉人；断连三天回来**不该补做**
+  //
+  // 放在同一条流上，第一次「顺手加个字段」就会开始侵蚀断连自治——而
+  // Assignment 的纯净正是 mechlet 能在断连时工作的地基。
+  //
+  // 命令流断了不影响下发，反之亦然，与「不用双向流」是同一条理由。
+  rpc Tasks(TasksRequest) returns (stream Task);
+
+  // ReportTaskResult 回报一条命令的执行结果。
+  //
+  // 单独一条上行 RPC 而不是搭 Report 的便车：Report 是周期性的观测快照
+  // （默认 15 秒一次），而命令的结果**必须立刻回去**——敲命令的人正在
+  // 终端前等着。
+  rpc ReportTaskResult(TaskResultRequest) returns (TaskResultResponse);
+}
+
+// ── 注册 ────────────────────────────────────────────────────────────────
+
+message RegisterRequest {
+  string node_name = 1;
+  // agent_version 是 mechlet 自身的版本，仅用于展示与排障。
+  string agent_version = 2;
+  // max_spec_schema 是它能理解的最高 ResolvedSpec 版本。
+  uint32 max_spec_schema = 3;
+  repeated Capability caps = 4;
+  string address = 5;
+  map<string, string> labels = 6;
+}
+
+message RegisterResponse {
+  // spec_schema 是 mechd 决定用来下发的版本：
+  //
+  //   min(mechd 支持的最高版本, mechlet 上报的 max_spec_schema)
+  //
+  // **控制面向后兼容 agent**：mechlet 比 mechd 新是允许的（按旧结构工作），
+  // 比 mechd 的支持下限旧则被拒绝并告知需要升到哪个版本。
+  uint32 spec_schema = 1;
+  uint32 reconcile_interval_s = 2;
+  uint32 report_interval_s = 3;
+  // session 标识本次会话，Subscribe 与 Report 带上它。
+  string session = 4;
+  uint32 health_interval_s = 5;
+}
+
+// Capability 是节点上某项运行时的能力，如 systemd 252 / docker 24。
+message Capability {
+  string name = 1;
+  string version = 2;
+  bool available = 3;
+  // detail 承载该 runtime 特有的细节，键名由各 runtime 自定。
+  map<string, string> detail = 4;
+}
+
+// ── 下发 ────────────────────────────────────────────────────────────────
+
+message SubscribeRequest {
+  string node_name = 1;
+  string session = 2;
+}
+
+// Assignment 是「这台机器上应该有什么」。
+//
+// **里面没有动词。** mechlet 收到的是期望状态而不是指令，怎么达成是它自己
+// 的事——这正是它在断连时仍能工作的原因。指令式接口会让断连自治不可能。
+message Assignment {
+  repeated ResolvedSpecEnvelope specs = 1;
+  // full_sync 为 true 表示这是全量：未列出的实例应当移除。
+  //
+  // 重连、mechd 重启、期望状态变化——**一律推全量**。不做增量同步、
+  // 不做确认序号、不做差异计算：下发本身幂等（digest 相同即无操作），
+  // 一个内容寻址的期望状态让整类同步协议问题消失。
+  bool full_sync = 2;
+  // revision 仅用于日志与排障，不参与任何判定。
+  uint64 revision = 3;
+  // cordoned 表示这台机器**当前被暂停调和**。
+  //
+  // 它是**状态不是动词**（ADR-0029）：下发说的永远是「这台机器现在是
+  // 什么情况」，而不是「去暂停」。因此重连时随全量一起重推，节点不需要
+  // 记住任何一次性的指令。
+  //
+  // 语义是「别动这台机器」：运行中的进程不碰，只停止调和。那正是
+  // 「我要手工调试这台机，别让 mechlet 把我的改动改回去」（10-cli §4.2）。
+  bool cordoned = 4;
+  // purge_orphans 是**该被清掉的孤儿实例键**。
+  //
+  // 它是状态不是动词，与 cordoned 同：节点每次收到都照做一遍，删一个
+  // 已经不在的目录是 no-op；断连三天回来仍然会收到它。
+  //
+  // **带的是实例键，不是绝对路径。** 节点删的是自己本地收据里记的那些
+  // 目录。考虑这个时序：purge 下发时节点失联，其间运维用同名重新部署了
+  // 组件，节点回来之后收到那条 purge——若带的是绝对路径，它会把**新数据**
+  // 删掉。带实例键则不会：那时本地状态已经是一个真实实例而不是收据，
+  // purge 直接空跑。
+  repeated string purge_orphans = 5;
+}
+
+message ResolvedSpecEnvelope {
+  // spec_json 是 ResolvedSpec，其中敏感值已换成 @@m7n:secret:<id>@@。
+  bytes spec_json = 1;
+  // secrets 是 id → 明文，**唯一承载明文的地方**。
+  //
+  // mechlet 只在内存持有：不写 spec 归档、不写日志、不参与 digest。
+  // 重启后重新 Register + Subscribe 拿一次——与「重连即全量重推」
+  // 是同一条路径，不额外设计。
+  map<string, bytes> secrets = 2;
+}
+
+// ── ad-hoc 命令 ─────────────────────────────────────────────────────────
+
+message TasksRequest {
+  string node_name = 1;
+  string session = 2;
+}
+
+// Task 是一条一次性命令。
+//
+// **它不落库、不重试、不排队**（ADR-0038）：离线就是离线，如实报告。
+// 一个「等它上线再执行」的队列会让人以为命令一定会生效，而那是期望状态
+// 的语义——真需要那种语义的东西，本来就该做成期望状态。
+message Task {
+  // id 用于把结果对回来。
+  string id = 1;
+  // kind 是命令类型。**显式枚举，加一种要过一次评审**：这是一条真正的
+  // 命令通道，「顺手加个 task 类型」比往 Assignment 里加字段容易得多。
+  //
+  //   restart  重启一个角色实例的工作负载
+  //
+  // 后续的 exec / logs 在这里加。
+  string kind = 2;
+  // component / role 定位到一个角色实例。
+  string component = 3;
+  string role = 4;
+  // deadline 是这条命令的最晚完成时刻（RFC3339）。
+  //
+  // **节点侧也要看它**：一条已经超时的命令，中心早已把它报成失败并
+  // 返回给用户了，此时再去动机器只会制造一次没人预期的重启。
+  string deadline = 5;
+}
+
+message TaskResultRequest {
+  string node_name = 1;
+  string session = 2;
+  string task_id = 3;
+  // ok 为 false 时 message 说明原因。
+  bool ok = 4;
+  string message = 5;
+  // duration_ms 让「慢」与「失败」分得开。
+  int64 duration_ms = 6;
+}
+
+message TaskResultResponse {}
+
+// ── 上报 ────────────────────────────────────────────────────────────────
+
+message ReportRequest {
+  string node_name = 1;
+  string session = 2;
+  repeated InstanceStatus instances = 3;
+  // facts 周期性刷新。它是**观测值**，不自动改变已固化的配置取值。
+  NodeFacts facts = 4;
+  // orphans 是**机器上还在、但下发里没有**的实例键。
+  //
+  // mechlet 只报不删：卸载不可逆，而「mechd 少发了一条」与「用户真的
+  // 删了这个组件」在节点侧分辨不了。
+  repeated string orphans = 5;
+  // orphan_records 是同一批孤儿，外加**它们在盘上留下了什么**。
+  //
+  // 只报一个键回答不了唯一要紧的问题：那台机器上到底还剩什么、在哪儿。
+  // 10-cli §4.3 明写「保留而不提供发现机制等于把问题推给未来」。
+  //
+  // 与 orphans 并存而不是取代它：字段类型改不了（线上格式），而这两个
+  // 列表**由同一段代码同时产出**，不会分叉。
+  repeated OrphanRecord orphan_records = 6;
+}
+
+message ReportResponse {
+  // resync 让 mechd 要求 mechlet 重新 Subscribe，用于会话失效等情形。
+  bool resync = 1;
+}
+
+message InstanceStatus {
+  string component = 1;
+  string role = 2;
+  // digest 是当前生效的 generation 的 digest。
+  //
+  // **它是收敛判据**：Rollout 靠「上报的 digest == 期望的 digest 且健康」
+  // 判定一批完成，而不是靠 mechlet 说「我成功了」。前者是状态，后者是事件——
+  // 状态可以重复确认，事件丢一次就永远丢了。
+  string digest = 3;
+  int32 generation = 4;
+  // result 取 ok | changed | drift | failed。
+  string result = 5;
+  WorkloadStatus workload = 6;
+  HealthStatus health = 7;
+  repeated ResourceStatus resources = 8;
+  repeated SuppressedDrift suppressed = 9;
+  string message = 10;
+  // workload_action 是调和器本轮**对工作负载做了什么**：restored | stopped。
+  //
+  // 没有它，一次「服务被人停了、调和把它拉起来」在中心完全不可见——
+  // 没有资源被 Apply、没有切软链，一个每分钟崩一次又被拉起的服务
+  // 看起来完全健康。
+  string workload_action = 11;
+  // workload_action_at 是它发生的时刻（RFC3339）。
+  //
+  // **带上时间才让它成为状态**：不带的话它只是「上一轮做了什么」，
+  // 而上报是周期快照——调和比上报密时那一轮会被覆盖掉，事件就丢了。
+  string workload_action_at = 12;
+  // rolled_back_from 是被节点自动回滚掉的那个 digest。
+  //
+  // **只有节点知道它做了什么**：mechd 看到的只是「上报的 digest 不是期望的
+  // 那个」，而那与「还没来得及升级」长得一样。Rollout 要靠它区分
+  // 「失败并已回滚」与「正在推进」。
+  string rolled_back_from = 13;
+  // removed 表示这个实例**已经按 runState: removed 拆干净了**。
+  //
+  // 它是 mechd 把 Component 从 removing 推进到「记录删除」的唯一依据。
+  // digest 在这里帮不上忙：RunState 不参与 digest，因此一个拆完的实例
+  // 与一个装着的实例上报的 digest 一模一样——分辨不出来。
+  //
+  // **是状态不是事件**：只要那份规格还说 removed，节点每一轮调和都会
+  // 重新确认一次并再报一次 true。丢掉一次上报没有后果，下一轮照旧。
+  bool removed = 14;
+  // retained_paths 是卸载时**故意留下**的目录（数据默认保留）。
+  //
+  // 跟着「拆完了」一起报，是因为这两件事在同一时刻才都成立：再晚一步
+  // 记录就被删了，那些目录会变成没人说得清来历的孤儿。
+  repeated string retained_paths = 15;
+}
+
+// OrphanRecord 是一个孤儿实例，以及它在盘上留下的东西。
+message OrphanRecord {
+  // key 形如 "pg-main__primary"。
+  string key = 1;
+  // retained_paths 是卸载时故意留下的目录（数据默认保留）。
+  //
+  // 空表示这个孤儿不是 remove 留下的，而是「下发里没有它了」——
+  // 那时机器上留着的是一整个还装着的实例，不只是几个目录。
+  repeated string retained_paths = 2;
+  // pack / version 说明这堆东西是谁、哪一版留下的。
+  //
+  // **决定「能不能删」时唯一要紧的信息。** 一个只有路径的孤儿回答不了它。
+  string pack = 3;
+  string version = 4;
+  // removed_at 是卸载完成的时刻（RFC3339），非 remove 留下的孤儿为空。
+  string removed_at = 5;
+}
+
+message WorkloadStatus {
+  string runtime = 1;
+  // state 取 running | stopped | failed | unknown。
+  string state = 2;
+  int64 pid = 3;
+  string since = 4;
+  int32 restarts = 5;
+}
+
+message HealthStatus {
+  // state 取 healthy | unhealthy | unknown。
+  string state = 1;
+  int32 consecutive_failures = 2;
+  string last_error = 3;
+  string checked_at = 4;
+}
+
+message ResourceStatus {
+  string id = 1;
+  string type = 2;
+  // state 取 ok | drift | failed。
+  string state = 3;
+  string detail = 4;
+}
+
+message SuppressedDrift {
+  string resource_id = 1;
+  string reason = 2;
+  string until = 3;
+}
+
+message NodeFacts {
+  // facts_json 是完整事实集，结构见 spec §9.4.2。
+  //
+  // 用 JSON 而非展开成 proto 字段：事实集会随发行版与硬件演进不断加字段，
+  // 每次都要改协议、两端同时升级，代价与收益完全不成比例。它本就是
+  // 给模板读的自由结构。
+  bytes facts_json = 1;
+  string collected_at = 2;
+}
+
+// ── 事件补报 ────────────────────────────────────────────────────────────
+
+message PushEventsRequest {
+  string node_name = 1;
+  string session = 2;
+  repeated Event events = 3;
+}
+
+message PushEventsResponse {
+  // accepted 是已接收的事件数，mechlet 据此裁掉本地缓冲。
+  uint32 accepted = 1;
+}
+
+message Event {
+  string at = 1;
+  // level 取 info | warn | error。
+  string level = 2;
+  string component = 3;
+  string role = 4;
+  string kind = 5;
+  string message = 6;
+}
+
+// ── blob ────────────────────────────────────────────────────────────────
+
+message FetchBlobRequest {
+  string sha256 = 1;
+  // offset 支持断点续传：内容寻址让这件事天然成立。
+  int64 offset = 2;
+}
+
+message BlobChunk {
+  bytes data = 1;
+  // total_size 只在第一块上有意义，供接收方预分配与显示进度。
+  int64 total_size = 2;
+}
+
+// RenewCertRequest 是一次证书续期。
+message RenewCertRequest {
+  string node_name = 1;
+  // csr_pem 是节点本机新生成的证书请求。**私钥不过网**，与 join 一致。
+  string csr_pem = 2;
+}
+
+message RenewCertResponse {
+  string cert_pem = 1;
+  string ca_pem = 2;
+}
