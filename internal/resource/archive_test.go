@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // tarEntry 是构造测试归档的一条条目。
@@ -307,6 +308,43 @@ func TestArchiveCorruptMarkerTriggersReextract(t *testing.T) {
 		t.Fatal(err)
 	}
 	requireClean(t, a)
+}
+
+// TestArchiveMarkerStableAcrossSlowReapply 钉住幂等承诺不能被
+// 标记文件里的时间戳打破——两次 Apply 之间隔了超过 RFC3339 的
+// 秒级精度，内容没变的话标记文件也必须没变。
+//
+// requireIdempotent 里连续两次 Apply 通常在同一秒内完成，测不出这个
+// 问题；CI 上偶发的 "第二次 Apply 产生了副作用" 就是它——两次 Apply
+// 跨了一秒边界，marker 里的 extractedAt 变了，被当成真实差异。
+func TestArchiveMarkerStableAcrossSlowReapply(t *testing.T) {
+	env := testEnv(t)
+	dest := filepath.Join(t.TempDir(), "gen")
+	putBlob(t, env, "main", makeTar(t, true, []tarEntry{{name: "a.txt", body: "x\n"}}))
+
+	a := build(t, env, mk(t, "archive:main", TypeArchive, map[string]any{
+		"blob": "main", "dest": dest,
+	}))
+	if err := a.Apply(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(filepath.Join(dest, archiveMarker))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(1100 * time.Millisecond)
+
+	if err := a.Apply(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(filepath.Join(dest, archiveMarker))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Errorf("内容没变，标记文件却变了:\n  之前 %s\n  之后 %s", before, after)
+	}
 }
 
 // makeZip 造一个 zip。

@@ -169,9 +169,22 @@ func (a *Archive) Apply(ctx context.Context) error {
 		return err
 	}
 
+	// Extracted 只在内容真的变了才更新——否则两次内容相同的 Apply
+	// 会因为时间戳不同而写出不同的标记文件，破坏 Apply 的幂等承诺
+	// （11-resource-engine.md §6，requireIdempotent 强制要求）。
+	extracted := time.Now().UTC().Format(time.RFC3339)
+	if prev, rerr := os.ReadFile(a.markerPath()); rerr == nil {
+		var pm markerFile
+		if json.Unmarshal(prev, &pm) == nil &&
+			pm.Blob == a.args.Blob && pm.SHA256 == ref.SHA256 &&
+			pm.Strip == a.args.Strip && pm.Entries == n {
+			extracted = pm.Extracted
+		}
+	}
+
 	m, err := json.Marshal(markerFile{
 		Blob: a.args.Blob, SHA256: ref.SHA256, Strip: a.args.Strip,
-		Entries: n, Extracted: time.Now().UTC().Format(time.RFC3339),
+		Entries: n, Extracted: extracted,
 	})
 	if err != nil {
 		return Permanent("写解压标记", err)
