@@ -224,8 +224,10 @@ func TestArchiveAllowsInternalSymlink(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != "../lib" {
-		t.Errorf("软链目标 = %q，期望 ../lib", got)
+	// Windows 的符号链接不接受 "/"（os.Symlink 会转成 "\"），
+	// 读回的目标天然是本机分隔符，这里按平台比较是正确行为，不是缺陷。
+	if want := filepath.FromSlash("../lib"); got != want {
+		t.Errorf("软链目标 = %q，期望 %q", got, want)
 	}
 }
 

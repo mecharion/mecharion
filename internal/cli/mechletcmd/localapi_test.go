@@ -14,6 +14,22 @@ import (
 	"github.com/mecharion/mecharion/internal/agent"
 )
 
+// shortSocketDir 建一个比 t.TempDir() 更短的临时目录，只给 unix socket 用。
+//
+// macOS 的 sun_path 上限约 104 字节，t.TempDir() 在 macOS CI 上产生的深层
+// 嵌套路径（.../T/TestXxx/子测试名/001/）加上 "mechlet.sock" 常常超限，
+// 导致 Listen 报 "bind: invalid argument"——与被测代码无关，纯粹是测试
+// 用的路径太长。
+func shortSocketDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "m7n-sock-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return dir
+}
+
 // TestLocalStatusHandlerServesReadOnlyJSON 钉住 ADR-0026 的
 // `--local` 诊断入口：真的走 unix socket + HTTP，不是直接调 handler——
 // 这条路径的价值恰恰在传输层（socket 权限即认证），跳过它测不出什么。
@@ -25,7 +41,7 @@ import (
 func TestLocalStatusHandlerServesReadOnlyJSON(t *testing.T) {
 	a := agent.New(agent.Options{Node: "node-7"})
 
-	sock := filepath.Join(t.TempDir(), "mechlet.sock")
+	sock := filepath.Join(shortSocketDir(t), "mechlet.sock")
 	lis, err := listenLocalUnix(sock)
 	if err != nil {
 		t.Fatal(err)
@@ -75,7 +91,7 @@ func TestListenLocalUnixSocketPermissions(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows 的 unix socket 文件没有 POSIX 权限位语义")
 	}
-	sock := filepath.Join(t.TempDir(), "mechlet.sock")
+	sock := filepath.Join(shortSocketDir(t), "mechlet.sock")
 	lis, err := listenLocalUnix(sock)
 	if err != nil {
 		t.Fatal(err)
@@ -94,7 +110,7 @@ func TestListenLocalUnixSocketPermissions(t *testing.T) {
 // TestListenLocalUnixRemovesStaleSocket 确认上一次进程留下的 socket 文件
 // 不会挡住新的 Listen——这是运维重启 mechlet 后的常规路径，不该失败。
 func TestListenLocalUnixRemovesStaleSocket(t *testing.T) {
-	sock := filepath.Join(t.TempDir(), "mechlet.sock")
+	sock := filepath.Join(shortSocketDir(t), "mechlet.sock")
 	if err := os.WriteFile(sock, []byte("残留文件，不是真的 socket"), 0o600); err != nil {
 		t.Fatal(err)
 	}

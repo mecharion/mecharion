@@ -5,12 +5,29 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/mecharion/mecharion/internal/protocol"
 )
+
+// shortSocketDir 建一个比 t.TempDir() 更短的临时目录，只给 unix socket 用。
+//
+// macOS 的 sun_path 上限约 104 字节，t.TempDir() 在 macOS CI 上产生的深层
+// 嵌套路径（.../T/TestXxx/子测试名/001/）加上 "mechlet.sock" 常常超限，
+// 导致 Listen 报 "bind: invalid argument"——与被测代码无关，纯粹是测试
+// 用的路径太长。
+func shortSocketDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "m7n-sock-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return dir
+}
 
 // 本文件钉住 ADR-0026：`mechctl --local component status` 直连
 // 本机 mechlet 的只读诊断入口，不经过 mechd。走真实的 unix socket + HTTP
@@ -21,7 +38,7 @@ import (
 // 只答 GET /local/v1/status。
 func stubMechletSocket(t *testing.T, view localStatusResponse) string {
 	t.Helper()
-	sock := filepath.Join(t.TempDir(), "mechlet.sock")
+	sock := filepath.Join(shortSocketDir(t), "mechlet.sock")
 	lis, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Fatal(err)
@@ -95,7 +112,7 @@ func TestLocalStatusRejectsComponentName(t *testing.T) {
 // 要求：mechlet 也连不上时，错误必须说清楚是连不上本机 mechlet，
 // 而不是一句通用的连接失败，更不能被误认成「mechd 连不上」。
 func TestLocalStatusFailsClearlyWhenMechletUnreachable(t *testing.T) {
-	sock := filepath.Join(t.TempDir(), "no-such-mechlet.sock") // 从未监听
+	sock := filepath.Join(shortSocketDir(t), "no-such-mechlet.sock") // 从未监听
 	out, err := runLocal(t, "--local-socket", sock)
 	if err == nil {
 		t.Fatal("mechlet 不可达时应当报错")

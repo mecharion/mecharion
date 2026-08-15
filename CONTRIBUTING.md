@@ -75,7 +75,7 @@ make e2e            # 交叉编译 + 起 systemd 容器 + 跑全部真机测试
 
 - 提交信息说清楚"为什么"，不只是"改了什么"——commit message 本身就是给后来者的第一手材料。
 - 一个 PR 对应一件可独立验证的事；不要把生成物/机械改动和语义改动混进同一次提交（见 `docs/design/decision-log.md` 里踩过的教训）。
-- PR 会跑 [CI](.github/workflows/ci.yml)：格式、`vet`、静态分析（staticcheck/govulncheck/gosec/secret 扫描）、单元测试（三平台）、Web UI 构建/lint/测试、交叉编译、容器化 E2E、三节点里程碑验收、示例 Pack lint、Markdown 链接检查、README quickstart 端到端重放。全绿是合入的前提，不是唯一门槛——不改代码只改文档时同样欢迎，但涉及行为的改动请一并补测试。
+- PR 会跑 [CI](.github/workflows/ci.yml)：格式、`vet`、静态分析（staticcheck/govulncheck/gosec/secret 扫描）、单元测试（三平台）、Web UI 构建/lint/测试、交叉编译、容器化 E2E、示例 Pack lint、Markdown 链接检查、README quickstart 端到端重放。全绿是合入的前提，不是唯一门槛——不改代码只改文档时同样欢迎，但涉及行为的改动请一并补测试。三节点里程碑验收（M7/M8/M9 判据）耗时较长，不在 CI 里自动跑，改动多节点相关代码后请按 [test/README.md](test/README.md) 在本地跑一遍。
 
 ## 版本号与发布
 

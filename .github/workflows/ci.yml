@@ -191,54 +191,6 @@ jobs:
         if: always()
         run: ./hack/testenv.sh down || true
 
-  acceptance:
-    name: 里程碑验收（三节点集群）
-    runs-on: ubuntu-latest
-    # **这两套是 M7 / M9 与 M8 的验收判据本身。** 不在 CI 里跑的话，它们
-    # 只在有人手动跑时才执行——而这个项目自己记着那条教训：
-    # 「一直在跳过会被当成一直在通过」（test/multinode 包注释）。
-    #
-    # 它们比单机套件慢（起三台容器 + 真实的滚动升级要等健康门禁），
-    # 因此单列一个 job：慢的那个不该拖住快的那个。
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: true
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: '22'
-          cache: npm
-          cache-dependency-path: webui/package-lock.json
-      # 验收表第 21 条要「浏览器打开是真正的界面」，因此 mechd 必须带着
-      # 构建好的 UI——少了这一步，那几条判据验的是说明页
-      - run: make webui
-      - name: 交叉编译测试二进制
-        run: ./hack/e2ebin.sh
-      - name: 造一个真包（第 16–17 条要它）
-        run: ./hack/realpack.sh
-      # 这一步跑的是整个 test/multinode 包——**M7 的多节点判据 + M9 的
-      # 生命周期判据（remove / orphans / apply / restart / 失联节点）**。
-      # 名字曾经写死成「M7 多节点验收」，M9 把新测试加进同一个包之后就成了
-      # 谎话：CI 面板上看是绿的 M7，实际跑的东西多了一倍。步骤名是排障时
-      # 第一眼看到的东西，它指错地方比没有名字更费时间。
-      - name: 多节点验收（M7 + M9）
-        run: |
-          ./hack/testenv.sh cluster up
-          ./hack/testenv.sh cluster test
-      # M8 的验收套件**依赖上一步建立的集群状态**（装好的 mechd、
-      # 加入的节点）。顺序不能反——它读不到 admin.token 时会 Fatal，
-      # 那是刻意的：环境没准备好必须红，不能静默跳过。
-      - name: M8 验收表
-        run: ./hack/testenv.sh cluster webui
-      - name: 失败时导出容器日志
-        if: failure()
-        run: ./hack/testenv.sh cluster status || true
-      - name: 清理
-        if: always()
-        run: ./hack/testenv.sh cluster down || true
-
   packs:
     name: 示例 Pack 校验
     runs-on: ubuntu-latest

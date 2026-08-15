@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 
 	"github.com/mecharion/mecharion/internal/spec"
 )
@@ -113,8 +114,20 @@ func (s *Symlink) Apply(context.Context) error {
 		return Transient("创建软链", err)
 	}
 	if err := os.Rename(tmp, s.args.Path); err != nil {
-		_ = os.Remove(tmp)
-		return Transient("切换软链", err)
+		// Windows 的 MoveFileEx 不接受用 MOVEFILE_REPLACE_EXISTING 覆盖一个
+		// 已存在的目录型软链（reparse point 带 FILE_ATTRIBUTE_DIRECTORY），
+		// 会报 Access is denied——mechlet 唯一的生产平台是 Linux（见
+		// symlink_test.go 的 requireSymlinkSupport），rename 原子性在
+		// Windows 上本就不成立，这里退化成非原子的「先删再建」。
+		if runtime.GOOS == "windows" {
+			if rmErr := os.Remove(s.args.Path); rmErr == nil {
+				err = os.Rename(tmp, s.args.Path)
+			}
+		}
+		if err != nil {
+			_ = os.Remove(tmp)
+			return Transient("切换软链", err)
+		}
 	}
 	return nil
 }

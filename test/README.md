@@ -127,6 +127,26 @@ WSL2 是 hybrid 布局（v1 控制器 ＋ `/sys/fs/cgroup/unified` 的 v2）。�
 支持 SIGHUP 热加载。选它而非 nginx 是刻意的——nginx 会把开发拖进发行版差异与
 包版本可用性的泥潭（[25-roadmap](../docs/design/25-roadmap.md)）。
 
+## 三节点里程碑验收（本地跑）
+
+M7（多节点）、M8（Web UI）、M9（生命周期）的验收判据装在 `test/multinode`
+与 `test/webui`，起三台同镜像容器接在一个用户自定义网络上。这套比单机套件
+慢得多（真实的滚动升级要等健康门禁），**不在 CI 里自动跑**，改动多节点/
+Web UI 相关代码后请在本地走一遍：
+
+```bash
+make webui                    # mechd 要带着构建好的 UI，否则验不出真实界面
+./hack/e2ebin.sh               # 交叉编译测试二进制
+./hack/realpack.sh             # 造一个真包（部分判据要用到）
+
+./hack/testenv.sh cluster up
+./hack/testenv.sh cluster test    # M7 + M9：test/multinode 整个包
+./hack/testenv.sh cluster webui   # M8：依赖上一步建立的集群状态，顺序不能反
+
+./hack/testenv.sh cluster status  # 排障：节点与 systemd 状态
+./hack/testenv.sh cluster down    # 用完清理
+```
+
 ## 容器与虚拟机的分界
 
 | 场景 | 容器 | 需要虚拟机 |
