@@ -6,4 +6,17 @@
 
 ## [未发布]
 
-在第一个标签发布之前，本文件的"未发布"章节不追溯 M0–M9 的开发历史——那段历史见 [`docs/design/25-roadmap.md`](docs/design/25-roadmap.md) 的里程碑表与 `docs/dev/` 下各阶段的 log.md，是给开发者看的过程记录，与面向使用者的 Changelog 是两种不同的文本，不做重复整理。从这里往后的条目，随每次发布补充。
+从这里往后的条目，随每次发布补充。
+
+## [v0.1.0-alpha.1] - 2026-08-15
+
+首个公开预发布。单机与多节点的完整链路都已跑通：资源引擎与三个
+runtime（systemd / docker / compose）、控制面 `mechd`、持续调和与
+漂移检测、升级与自动回滚、多节点 mTLS 加入与分批滚动升级、Web UI、
+组件生命周期（`remove` / `orphans` / `apply` / `restart`）。
+
+- [pack/v1 规范](docs/spec/pack-v1.md) 是 draft-stable：格式已经稳定到可以据此写 Pack，实现过程中发现的问题仍可能导致调整，变更会记录。
+- 发布制品（`mechd`/`mechlet`/`mechctl`/`mechpack`）附带 checksum、SBOM 与 cosign keyless 签名，见 [CONTRIBUTING.md](CONTRIBUTING.md#版本号与发布)。
+- **尚不可用于任何生产场景**——接口与磁盘布局都可能再变。
+
+完整能力边界见 [README](README.md)，里程碑历史见 [docs/design/25-roadmap.md](docs/design/25-roadmap.md)。
