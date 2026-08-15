@@ -245,7 +245,7 @@ func (f *fixture) webappSpec(mut ...func(*spec.ResolvedSpec)) *spec.ResolvedSpec
 		Resources: []spec.Resource{
 			{
 				ID: "template:app.yaml", Type: "template",
-				Args:        mustJSON(map[string]any{"dest": config + "/app.yaml", "content": "port: 8080\n"}),
+				Args:        mustJSON(map[string]any{"dest": filepath.Join(config, "app.yaml"), "content": "port: 8080\n"}),
 				DriftPolicy: "report", Notify: "reload",
 			},
 		},
