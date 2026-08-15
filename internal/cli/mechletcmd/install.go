@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -336,8 +337,19 @@ func replaceSymlink(link, target string) error {
 	// rename 覆盖软链是原子的；先删再建会留下一个窗口，
 	// 那期间 `mechctl` 是 command not found
 	if err := os.Rename(tmp, link); err != nil {
-		os.Remove(tmp)
-		return err
+		// Windows 的 MoveFileEx 不接受用 MOVEFILE_REPLACE_EXISTING 覆盖一个
+		// 已存在的目录型软链（reparse point 带 FILE_ATTRIBUTE_DIRECTORY），
+		// 会报 Access is denied——mechlet 唯一的生产平台是 Linux，rename
+		// 原子性在 Windows 上本就不成立，这里退化成非原子的「先删再建」。
+		if runtime.GOOS == "windows" {
+			if rmErr := os.Remove(link); rmErr == nil {
+				err = os.Rename(tmp, link)
+			}
+		}
+		if err != nil {
+			os.Remove(tmp)
+			return err
+		}
 	}
 	return nil
 }

@@ -157,7 +157,11 @@ cmd_up() {
         sleep 1
     done
 
-    state=$(docker exec "$M7N_NODE" systemctl is-system-running 2>/dev/null || echo unknown)
+    # is-system-running 对 degraded 也返回非零退出码——`|| echo unknown`
+    # 会在这种情况下把 echo 的输出也一并接进 $()，state 变成
+    # "degraded\nunknown" 这种两行的怪字符串，谁都匹配不上，白白 die。
+    # 跟上面探测循环一样用 `|| true`，"unknown" 只在真拿不到状态时兜底。
+    state=$(docker exec "$M7N_NODE" systemctl is-system-running 2>/dev/null || true)
     case "$state" in
         running|degraded)
             info "systemd 就绪（$state）"
@@ -168,7 +172,7 @@ cmd_up() {
         *)
             printf '\n' >&2
             docker logs --tail 40 "$M7N_NODE" >&2
-            die "systemd 未能启动（状态: $state）。上方是容器日志。"
+            die "systemd 未能启动（状态: ${state:-unknown}）。上方是容器日志。"
             ;;
     esac
 
@@ -370,8 +374,10 @@ cluster_status() {
         --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
     printf '\n'
     for n in $(cluster_nodes); do
-        printf '  %-10s %s\n' "$n" \
-            "$(docker exec "$n" systemctl is-system-running 2>/dev/null || echo 不可达)"
+        # is-system-running 对 degraded 也返回非零退出码——`|| echo` 会在
+        # 节点其实可达、只是 degraded 时把两段输出一起接进 $()。
+        state=$(docker exec "$n" systemctl is-system-running 2>/dev/null || true)
+        printf '  %-10s %s\n' "$n" "${state:-不可达}"
     done
 }
 
