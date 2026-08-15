@@ -7,8 +7,11 @@ on:
       - "v*"
 
 permissions:
-  contents: write   # 创建 GitHub Release、上传制品
-  id-token: write    # cosign keyless 签名 + build provenance attestation 都要靠这个换 OIDC token
+  contents: write      # 创建 GitHub Release、上传制品
+  id-token: write      # cosign keyless 签名 + build provenance attestation 都要靠这个换 OIDC token
+  attestations: write  # attest-build-provenance 实际写入证明记录要靠这个；只有 id-token 换得到
+                        # token、写不进去——v0.1.0-alpha.1 首次发布时漏了这条，拿到的错误是
+                        # "Resource not accessible by integration"
 
 env:
   GO_VERSION: "1.26" # 与 ci.yml 保持同一个值——发布用的 Go 版本不该跟 CI 验证过的不一样
